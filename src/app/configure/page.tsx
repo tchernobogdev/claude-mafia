@@ -38,13 +38,13 @@ const ROLE_COLORS: Record<string, string> = {
   underboss: "#8b5cf6",
   capo: "#facc15",
   soldier: "#6a6a7a",
+  tester: "#22d3ee",
 };
 
 const ACTION_COLORS: Record<string, string> = {
   delegate: "#8b5cf6",
-  ask: "#3b82f6",
-  review: "#22c55e",
-  summarize: "#f59e0b",
+  collaborate: "#3b82f6",
+  test: "#22d3ee",
 };
 
 const NODE_W = 200;
@@ -61,6 +61,14 @@ type ConnectingState = {
 
 interface ContextMenu {
   agentId: string;
+  x: number;
+  y: number;
+}
+
+interface RelContextMenu {
+  rel: Relationship;
+  fromName: string;
+  toName: string;
   x: number;
   y: number;
 }
@@ -102,6 +110,7 @@ export default function ConfigurePage() {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [relContextMenu, setRelContextMenu] = useState<RelContextMenu | null>(null);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -128,7 +137,7 @@ export default function ConfigurePage() {
 
   // Close context menu on click anywhere
   useEffect(() => {
-    const handler = () => setContextMenu(null);
+    const handler = () => { setContextMenu(null); setRelContextMenu(null); };
     window.addEventListener("click", handler);
     return () => window.removeEventListener("click", handler);
   }, []);
@@ -139,6 +148,7 @@ export default function ConfigurePage() {
       if (e.key === "Escape") {
         setConnecting(null);
         setContextMenu(null);
+        setRelContextMenu(null);
         setEditForm(null);
       }
     };
@@ -397,19 +407,6 @@ export default function ConfigurePage() {
     return { path, arrowX: x2, arrowY: y2, arrowAngle: angle, labelX: midX, labelY: midY - 8 };
   };
 
-  // Hierarchy lines
-  const hierarchyLines: { from: Agent; to: Agent }[] = [];
-  for (const agent of agents) {
-    if (agent.parentId) {
-      const parent = agents.find((a) => a.id === agent.parentId);
-      if (parent) hierarchyLines.push({ from: parent, to: agent });
-    }
-    // Underbosses connect to big boss
-    if (agent.role === "underboss") {
-      hierarchyLines.push({ from: BOSS_NODE, to: agent });
-    }
-  }
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -420,7 +417,7 @@ export default function ConfigurePage() {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1 bg-bg-card border border-border rounded px-2 py-1">
             <span className="text-xs text-text-muted mr-1">Connect as:</span>
-            {["delegate", "ask", "review", "summarize"].map((a) => (
+            {["delegate", "collaborate", "test"].map((a) => (
               <button
                 key={a}
                 onClick={() => setConnectAction(a)}
@@ -464,6 +461,7 @@ export default function ConfigurePage() {
                 <option value="underboss">Underboss</option>
                 <option value="capo">Capo</option>
                 <option value="soldier">Soldier</option>
+                <option value="tester">Tester</option>
               </select>
             </div>
             <div>
@@ -535,52 +533,58 @@ export default function ConfigurePage() {
             <marker id="arrow-delegate" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
               <polygon points="0 0, 8 3, 0 6" fill={ACTION_COLORS.delegate} />
             </marker>
-            <marker id="arrow-ask" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill={ACTION_COLORS.ask} />
+            <marker id="arrow-collaborate" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill={ACTION_COLORS.collaborate} />
             </marker>
-            <marker id="arrow-review" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill={ACTION_COLORS.review} />
-            </marker>
-            <marker id="arrow-summarize" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill={ACTION_COLORS.summarize} />
+            <marker id="arrow-collaborate-rev" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
+              <polygon points="8 0, 0 3, 8 6" fill={ACTION_COLORS.collaborate} />
             </marker>
           </defs>
           <g transform={`translate(${pan.x}, ${pan.y})`}>
-            {/* Hierarchy lines (dashed) */}
-            {hierarchyLines.map(({ from, to }) => {
-              const info = getConnectorPath(from, to);
-              return (
-                <path
-                  key={`h-${from.id}-${to.id}`}
-                  d={info.path}
-                  fill="none"
-                  stroke="#2a2a3a"
-                  strokeWidth="1.5"
-                  strokeDasharray="6 4"
-                />
-              );
-            })}
-
             {/* Relationship connectors */}
             {relationships.map((rel) => {
               const from = allNodes.find((a) => a.id === rel.fromAgentId);
               const to = allNodes.find((a) => a.id === rel.toAgentId);
               if (!from || !to) return null;
+              if (!ACTION_COLORS[rel.action]) return null; // skip legacy relationship types
 
-              const color = ACTION_COLORS[rel.action] || "#6a6a7a";
+              const color = ACTION_COLORS[rel.action];
               const groupKey = getRelGroupKey(rel.fromAgentId, rel.toAgentId);
               const idx = relGroupIndex[rel.id] ?? 0;
               const total = relGroupCounts[groupKey] ?? 1;
               const info = getConnectorPath(from, to, idx, total);
+              const isBidirectional = rel.action === "collaborate";
 
               return (
-                <g key={rel.id} className="pointer-events-auto cursor-pointer" onClick={() => deleteRelationship(rel.id)}>
+                <g
+                  key={rel.id}
+                  className="pointer-events-auto cursor-pointer"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setRelContextMenu({
+                      rel,
+                      fromName: from.name,
+                      toName: to.name,
+                      x: e.clientX,
+                      y: e.clientY,
+                    });
+                  }}
+                >
+                  {/* Invisible fat hit area for easier clicking */}
+                  <path
+                    d={info.path}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth="12"
+                  />
                   <path
                     d={info.path}
                     fill="none"
                     stroke={color}
                     strokeWidth="2"
                     markerEnd={`url(#arrow-${rel.action})`}
+                    markerStart={isBidirectional ? `url(#arrow-${rel.action}-rev)` : undefined}
                   />
                   <text
                     x={info.labelX}
@@ -667,33 +671,93 @@ export default function ConfigurePage() {
       </div>
 
       {/* Context menu */}
-      {contextMenu && (
+      {contextMenu && (() => {
+        const agentRels = relationships.filter(
+          (r) => ACTION_COLORS[r.action] && (r.fromAgentId === contextMenu.agentId || r.toAgentId === contextMenu.agentId)
+        );
+        return (
+          <div
+            className="fixed bg-bg-card border border-border rounded-lg shadow-lg py-1 z-50 min-w-[220px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => openEditForm(contextMenu.agentId)}
+              className="w-full text-left px-4 py-1.5 text-sm text-text hover:bg-bg-hover transition-colors"
+            >
+              Edit Agent
+            </button>
+            <button
+              onClick={() => {
+                router.push(`/configure/${contextMenu.agentId}`);
+                setContextMenu(null);
+              }}
+              className="w-full text-left px-4 py-1.5 text-sm text-text hover:bg-bg-hover transition-colors"
+            >
+              Full Config Page
+            </button>
+            {agentRels.length > 0 && (
+              <>
+                <div className="border-t border-border my-1" />
+                <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-text-muted">Relationships</div>
+                {agentRels.map((rel) => {
+                  const other = rel.fromAgentId === contextMenu.agentId
+                    ? allNodes.find((a) => a.id === rel.toAgentId)
+                    : allNodes.find((a) => a.id === rel.fromAgentId);
+                  const otherName = other?.name || "?";
+                  const arrow = rel.action === "collaborate" ? "\u2194" : (rel.fromAgentId === contextMenu.agentId ? "\u2192" : "\u2190");
+                  return (
+                    <div key={rel.id} className="flex items-center justify-between px-4 py-1 hover:bg-bg-hover group/rel">
+                      <span className="text-xs">
+                        <span style={{ color: ACTION_COLORS[rel.action] }}>{rel.action}</span>
+                        {" "}{arrow} {otherName}
+                      </span>
+                      <button
+                        onClick={() => { deleteRelationship(rel.id); setContextMenu(null); }}
+                        className="text-[10px] text-text-muted hover:text-danger opacity-0 group-hover/rel:opacity-100 transition-opacity"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+            <div className="border-t border-border my-1" />
+            <button
+              onClick={() => deleteAgent(contextMenu.agentId)}
+              className="w-full text-left px-4 py-1.5 text-sm text-danger hover:bg-danger/10 transition-colors"
+            >
+              Delete Agent
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* Relationship context menu */}
+      {relContextMenu && (
         <div
-          className="fixed bg-bg-card border border-border rounded-lg shadow-lg py-1 z-50"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          className="fixed bg-bg-card border border-border rounded-lg shadow-lg py-1 z-50 min-w-[200px]"
+          style={{ left: relContextMenu.x, top: relContextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
-          <button
-            onClick={() => openEditForm(contextMenu.agentId)}
-            className="w-full text-left px-4 py-1.5 text-sm text-text hover:bg-bg-hover transition-colors"
-          >
-            Edit Agent
-          </button>
+          <div className="px-4 py-1.5 text-xs text-text-muted border-b border-border">
+            <span style={{ color: ACTION_COLORS[relContextMenu.rel.action] || "#6a6a7a" }}>
+              {relContextMenu.rel.action}
+            </span>
+            {" "}
+            {relContextMenu.rel.action === "collaborate"
+              ? `${relContextMenu.fromName} \u2194 ${relContextMenu.toName}`
+              : `${relContextMenu.fromName} \u2192 ${relContextMenu.toName}`}
+          </div>
           <button
             onClick={() => {
-              router.push(`/configure/${contextMenu.agentId}`);
-              setContextMenu(null);
+              deleteRelationship(relContextMenu.rel.id);
+              setRelContextMenu(null);
             }}
-            className="w-full text-left px-4 py-1.5 text-sm text-text hover:bg-bg-hover transition-colors"
-          >
-            Full Config Page
-          </button>
-          <div className="border-t border-border my-1" />
-          <button
-            onClick={() => deleteAgent(contextMenu.agentId)}
             className="w-full text-left px-4 py-1.5 text-sm text-danger hover:bg-danger/10 transition-colors"
           >
-            Delete Agent
+            Delete Relationship
           </button>
         </div>
       )}
@@ -721,6 +785,7 @@ export default function ConfigurePage() {
                   <option value="underboss">Underboss</option>
                   <option value="capo">Capo</option>
                   <option value="soldier">Soldier</option>
+                  <option value="tester">Tester</option>
                 </select>
               </div>
               <div>
@@ -773,7 +838,7 @@ export default function ConfigurePage() {
 
       {/* Legend */}
       <div className="flex items-center gap-6 text-xs text-text-muted">
-        <span>Drag to move &middot; Right-click to edit &middot; Hover ports to connect &middot; Click connector to delete</span>
+        <span>Drag to move &middot; Right-click to edit &middot; Hover ports to connect &middot; Right-click connector to delete</span>
         <div className="flex items-center gap-3 ml-auto">
           {Object.entries(ACTION_COLORS).map(([action, color]) => (
             <div key={action} className="flex items-center gap-1">
@@ -781,10 +846,6 @@ export default function ConfigurePage() {
               <span>{action}</span>
             </div>
           ))}
-          <div className="flex items-center gap-1">
-            <div className="w-3 h-0.5 border-t border-dashed border-border" />
-            <span>hierarchy</span>
-          </div>
         </div>
       </div>
     </div>

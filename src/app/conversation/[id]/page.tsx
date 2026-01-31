@@ -63,8 +63,9 @@ const ROLE_COLORS: Record<string, string> = {
 const TOOL_LABELS: Record<string, string> = {
   delegate_task: "Delegated",
   ask_agent: "Asked",
-  review_work: "Sent for review",
-  summarize_for: "Summarized",
+  submit_result: "Submitted result",
+  wait_for_messages: "Waiting for messages",
+  respond_to_message: "Responded",
   escalate_to_boss: "Escalated to Boss",
   read_file: "Read file",
   write_file: "Wrote file",
@@ -218,11 +219,25 @@ export default function ConversationPage() {
     return () => evtSource.close();
   }, [conversationId, loadConversation]);
 
-  // Auto-scroll in live mode
+  // Auto-scroll only if user is already near the bottom
+  const isNearBottom = (el: HTMLElement | null) => {
+    if (!el) return false;
+    let container = el.parentElement;
+    while (container && container.scrollHeight <= container.clientHeight) {
+      container = container.parentElement;
+    }
+    if (!container) return false;
+    return container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+  };
+
   useEffect(() => {
     if (!isStepMode) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-      activityBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      if (isNearBottom(bottomRef.current)) {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+      if (isNearBottom(activityBottomRef.current)) {
+        activityBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
     }
   }, [activity, messages, isStepMode]);
 

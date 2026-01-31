@@ -10,7 +10,7 @@ generator client {
 model Agent {
   id           String   @id @default(cuid())
   name         String
-  role         String   // "underboss" | "capo" | "soldier"
+  role         String   // "underboss" | "capo" | "soldier" | "tester"
   specialty    String?
   systemPrompt String   @default("")
   model        String   @default("claude-sonnet-4-5-20250929")
@@ -33,7 +33,7 @@ model Relationship {
   id          String @id @default(cuid())
   fromAgentId String
   toAgentId   String
-  action      String // "summarize" | "ask" | "review" | "delegate"
+  action      String // "delegate" | "collaborate" | "test"
   cardinality String @default("1:1") // "1:1" | "1:many" | "many:1"
   fromAgent   Agent  @relation("FromAgent", fields: [fromAgentId], references: [id], onDelete: Cascade)
   toAgent     Agent  @relation("ToAgent", fields: [toAgentId], references: [id], onDelete: Cascade)

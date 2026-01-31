@@ -19,6 +19,7 @@ export default function Dashboard() {
   const router = useRouter();
   const { toast } = useToast();
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [agents, setAgents] = useState<unknown[]>([]);
   const [task, setTask] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [images, setImages] = useState<{ type: "base64"; media_type: string; data: string; name: string }[]>([]);
@@ -32,12 +33,19 @@ export default function Dashboard() {
       .then(setConversations);
   }, []);
 
+  const loadAgents = useCallback(() => {
+    fetch("/api/agents")
+      .then((r) => r.json())
+      .then((data) => { if (Array.isArray(data)) setAgents(data); });
+  }, []);
+
   useEffect(() => {
     loadConversations();
+    loadAgents();
     // Poll every 5 seconds to catch status updates
     const interval = setInterval(loadConversations, 5000);
     return () => clearInterval(interval);
-  }, [loadConversations]);
+  }, [loadConversations, loadAgents]);
 
   const deleteConversation = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
@@ -108,6 +116,9 @@ export default function Dashboard() {
   };
 
   const activeOps = conversations.filter((c) => c.status === "active").length;
+  const successRate = conversations.length > 0
+    ? Math.round((conversations.filter((c) => c.status === "completed").length / conversations.length) * 100)
+    : 0;
 
   return (
     <div className="space-y-8 animate-fadeIn">
@@ -124,11 +135,11 @@ export default function Dashboard() {
         </div>
         <div className="glass-card p-4 animate-slideUp" style={{ animationDelay: "0.2s" }}>
           <div className="text-text-muted text-xs uppercase tracking-wide mb-1">Total Agents</div>
-          <div className="text-2xl font-bold text-success">6</div>
+          <div className="text-2xl font-bold text-success">{agents.length}</div>
         </div>
         <div className="glass-card p-4 animate-slideUp" style={{ animationDelay: "0.3s" }}>
           <div className="text-text-muted text-xs uppercase tracking-wide mb-1">Success Rate</div>
-          <div className="text-2xl font-bold text-gold">94%</div>
+          <div className="text-2xl font-bold text-gold">{successRate}%</div>
         </div>
       </div>
 

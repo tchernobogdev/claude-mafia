@@ -36,6 +36,16 @@ interface ArrowAnim {
   lifetime: number;
 }
 
+interface FloatingNotif {
+  id: string;
+  agentId: string;
+  label: string;
+  color: string;
+  createdAt: number;
+  lifetime: number;
+  offsetX: number; // random horizontal jitter so they don't stack
+}
+
 const ROLE_COLORS: Record<string, string> = {
   underboss: "#8b5cf6",
   capo: "#facc15",
@@ -45,13 +55,20 @@ const ROLE_COLORS: Record<string, string> = {
 const ACTION_COLORS: Record<string, string> = {
   delegate_task: "#a78bfa",
   ask_agent: "#60a5fa",
-  review_work: "#fbbf24",
-  summarize_for: "#34d399",
+  submit_result: "#34d399",
+  wait_for_messages: "#94a3b8",
+  respond_to_message: "#22c55e",
   escalate_to_boss: "#f87171",
-  read_file: "#22d3ee",
-  write_file: "#fb923c",
-  list_files: "#22d3ee",
-  run_command: "#c084fc",
+  Read: "#22d3ee",
+  Write: "#fb923c",
+  Edit: "#fb923c",
+  Bash: "#c084fc",
+  Glob: "#22d3ee",
+  Grep: "#22d3ee",
+  NotebookEdit: "#a78bfa",
+  WebFetch: "#60a5fa",
+  WebSearch: "#60a5fa",
+  TodoWrite: "#34d399",
   response: "#22c55e",
   thinking: "#94a3b8",
   delegating: "#a78bfa",
@@ -60,14 +77,31 @@ const ACTION_COLORS: Record<string, string> = {
 const ACTION_SHORT: Record<string, string> = {
   delegate_task: "delegate",
   ask_agent: "ask",
-  review_work: "review",
-  summarize_for: "summarize",
+  submit_result: "submit",
+  wait_for_messages: "standby",
+  respond_to_message: "respond",
   escalate_to_boss: "escalate",
   response: "response",
 };
 
 const ARROW_LIFETIME = 4000;
 const RESPONSE_ARROW_LIFETIME = 6000;
+const NOTIF_LIFETIME = 3000;
+const NOTIF_FLOAT_DISTANCE = 50; // SVG units to float upward
+
+const NON_COMM_TOOLS = new Set(["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "WebFetch", "WebSearch", "TodoWrite"]);
+const TOOL_NOTIF_LABELS: Record<string, string> = {
+  Read: "📖 read file",
+  Write: "✏️ write file",
+  Edit: "✏️ edit file",
+  Bash: "⚡ run cmd",
+  Glob: "🔍 glob",
+  Grep: "🔍 grep",
+  NotebookEdit: "📓 notebook",
+  WebFetch: "🌐 web fetch",
+  WebSearch: "🔎 web search",
+  TodoWrite: "📝 todo",
+};
 const NODE_RADIUS = 18;
 const NODE_COL_WIDTH = 120;
 const LEVEL_HEIGHT = 110;
@@ -79,6 +113,7 @@ interface Props {
 export function ActivityTree({ activity }: Props) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [arrows, setArrows] = useState<ArrowAnim[]>([]);
+  const [floatingNotifs, setFloatingNotifs] = useState<FloatingNotif[]>([]);
   const [activeAgentIds, setActiveAgentIds] = useState<Set<string>>(new Set());
   const [activeAgentStatus, setActiveAgentStatus] = useState<Map<string, string>>(new Map());
   const processedRef = useRef(0);
@@ -191,6 +226,7 @@ export function ActivityTree({ activity }: Props) {
     processedRef.current = activity.length;
 
     const newArrows: ArrowAnim[] = [];
+    const newNotifs: FloatingNotif[] = [];
     const active = new Set(activeAgentIds);
     const statuses = new Map(activeAgentStatus);
 
@@ -202,12 +238,25 @@ export function ActivityTree({ activity }: Props) {
         statuses.set(sourceId, "thinking");
       }
 
+      // Floating notifications for non-communication tools
+      if (item.type === "tool" && sourceId && item.tool && NON_COMM_TOOLS.has(item.tool)) {
+        newNotifs.push({
+          id: crypto.randomUUID(),
+          agentId: sourceId,
+          label: TOOL_NOTIF_LABELS[item.tool] || item.tool,
+          color: ACTION_COLORS[item.tool] || "#94a3b8",
+          createdAt: Date.now(),
+          lifetime: NOTIF_LIFETIME,
+          offsetX: (Math.random() - 0.5) * 40,
+        });
+      }
+
       // Delegation / ask / review arrows: parent → child (downward)
       if (item.type === "tool" && sourceId && item.targetAgents && item.targetAgents.length > 0) {
         const color = ACTION_COLORS[item.tool || ""] || "#a78bfa";
         const label = ACTION_SHORT[item.tool || ""] || item.tool || "";
         // Update status to delegating for delegation tools
-        const delegationTools = ["delegate_task", "ask_agent", "review_work", "summarize_for"];
+        const delegationTools = ["delegate_task", "ask_agent"];
         if (item.tool && delegationTools.includes(item.tool)) {
           statuses.set(sourceId, "delegating");
         }
@@ -265,6 +314,7 @@ export function ActivityTree({ activity }: Props) {
     }
 
     if (newArrows.length > 0) setArrows((prev) => [...prev, ...newArrows]);
+    if (newNotifs.length > 0) setFloatingNotifs((prev) => [...prev, ...newNotifs]);
     setActiveAgentIds(active);
     setActiveAgentStatus(statuses);
   }, [activity, activeAgentIds, activeAgentStatus, nameToId, parentMap]);
@@ -276,6 +326,11 @@ export function ActivityTree({ activity }: Props) {
       setArrows((prev) => {
         const now = Date.now();
         const filtered = prev.filter((a) => now - a.createdAt < a.lifetime);
+        return filtered.length !== prev.length ? filtered : prev;
+      });
+      setFloatingNotifs((prev) => {
+        const now = Date.now();
+        const filtered = prev.filter((n) => now - n.createdAt < n.lifetime);
         return filtered.length !== prev.length ? filtered : prev;
       });
     }, 60);
@@ -423,6 +478,25 @@ export function ActivityTree({ activity }: Props) {
                   {activeAgentStatus.get(node.agent.id)}
                 </text>
               )}
+            </g>
+          );
+        })}
+
+        {/* Floating tool notifications */}
+        {floatingNotifs.map((notif) => {
+          const pos = posMap.get(notif.agentId);
+          if (!pos) return null;
+          const elapsed = Date.now() - notif.createdAt;
+          const progress = Math.min(elapsed / notif.lifetime, 1);
+          const yOffset = -NODE_RADIUS - 12 - progress * NOTIF_FLOAT_DISTANCE;
+          const opacity = progress < 0.2 ? progress / 0.2 : progress > 0.6 ? 1 - (progress - 0.6) / 0.4 : 1;
+
+          return (
+            <g key={notif.id} transform={`translate(${pos.x + notif.offsetX}, ${pos.y + yOffset})`} opacity={opacity}>
+              <rect x={-30} y={-8} width={60} height={16} rx={4} fill={notif.color} opacity={0.15} />
+              <text textAnchor="middle" y={4} fill={notif.color} fontSize="7" fontFamily="monospace" fontWeight="bold">
+                {notif.label}
+              </text>
             </g>
           );
         })}

@@ -2,13 +2,16 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance } from "@anthro
 import { z } from "zod";
 import { prisma } from "./db";
 import { escalationManager } from "./escalation";
+import { agentPool } from "./agent-pool";
 
 interface McpToolContext {
   conversationId: string;
+  agentId: string;
   depth: number;
   agentInvocations: Map<string, number>;
   workingDirectory?: string;
   signal?: AbortSignal;
+  abortController?: AbortController;
   executeAgent: (opts: {
     agentId: string;
     task: string;
@@ -33,6 +36,7 @@ export async function buildAgentMcpServer(
     where: { id: agentId },
     include: {
       outgoingRels: { include: { toAgent: true } },
+      incomingRels: { include: { fromAgent: true } },
     },
   });
 
@@ -46,28 +50,24 @@ export async function buildAgentMcpServer(
   }> = [];
 
   const delegateRels = agent.outgoingRels.filter((r) => r.action === "delegate");
-  const askRels = agent.outgoingRels.filter((r) => r.action === "ask");
-  const reviewRels = agent.outgoingRels.filter((r) => r.action === "review");
-  const summarizeRels = agent.outgoingRels.filter((r) => r.action === "summarize");
+  const outgoingCollabRels = agent.outgoingRels.filter((r) => r.action === "collaborate");
+  const incomingCollabRels = agent.incomingRels.filter((r) => r.action === "collaborate");
 
   // Helper to build target description
-  function describeTargets(rels: typeof delegateRels): string {
-    return rels
-      .map((r) => {
-        const a = r.toAgent;
-        let desc = `- "${a.name}" (ID: ${a.id}) — ${a.role}`;
-        if (a.specialty) desc += `, specialty: ${a.specialty}`;
-        if (a.systemPrompt) desc += ` | prompt: "${a.systemPrompt.slice(0, 120)}${a.systemPrompt.length > 120 ? "..." : ""}"`;
-        return desc;
-      })
-      .join("\n");
+  function describeAgent(a: { id: string; name: string; role: string; specialty: string | null; systemPrompt: string }): string {
+    let desc = `- "${a.name}" (ID: ${a.id}) — ${a.role}`;
+    if (a.specialty) desc += `, specialty: ${a.specialty}`;
+    if (a.systemPrompt) desc += ` | prompt: "${a.systemPrompt.slice(0, 120)}${a.systemPrompt.length > 120 ? "..." : ""}"`;
+    return desc;
   }
 
+  // === delegate_task (unchanged) ===
   if (delegateRels.length > 0) {
     const validIds = delegateRels.map((r) => r.toAgent.id);
+    const targetDesc = delegateRels.map((r) => describeAgent(r.toAgent)).join("\n");
     tools.push({
       name: "delegate_task",
-      description: `Delegate a task to one or more subordinate agents in parallel. Choose agents based on their specialty.\n\nAvailable targets:\n${describeTargets(delegateRels)}`,
+      description: `Delegate a task to one or more subordinate agents in parallel. Choose agents based on their specialty.\n\nAvailable targets:\n${targetDesc}`,
       inputSchema: {
         targets: z.array(z.string()).describe("Array of agent IDs to delegate to"),
         task: z.string().describe("The task description to delegate"),
@@ -76,13 +76,11 @@ export async function buildAgentMcpServer(
         const targets = args.targets as string[];
         const task = args.task as string;
 
-        // Validate targets
         const filteredTargets = targets.filter((t) => validIds.includes(t));
         if (filteredTargets.length === 0) {
           return { content: [{ type: "text" as const, text: `[Error: No valid target IDs. Valid IDs: ${validIds.join(", ")}]` }] };
         }
 
-        // Emit tool_call activity
         const targetAgents = await prisma.agent.findMany({
           where: { id: { in: filteredTargets } },
           select: { id: true, name: true, role: true },
@@ -128,11 +126,25 @@ export async function buildAgentMcpServer(
     });
   }
 
-  if (askRels.length > 0) {
-    const validIds = askRels.map((r) => r.toAgent.id);
+  // === ask_agent — implicit for ANY connected agent (outgoing + incoming, all types) ===
+  const askTargets = new Map<string, { id: string; name: string; role: string; specialty: string | null; systemPrompt: string }>();
+  for (const rel of agent.outgoingRels) {
+    if (!askTargets.has(rel.toAgent.id) && rel.toAgent.id !== agentId) {
+      askTargets.set(rel.toAgent.id, rel.toAgent);
+    }
+  }
+  for (const rel of agent.incomingRels) {
+    if (!askTargets.has(rel.fromAgent.id) && rel.fromAgent.id !== agentId) {
+      askTargets.set(rel.fromAgent.id, rel.fromAgent);
+    }
+  }
+
+  if (askTargets.size > 0) {
+    const validIds = [...askTargets.keys()];
+    const askTargetDesc = [...askTargets.values()].map(describeAgent).join("\n");
     tools.push({
       name: "ask_agent",
-      description: `Ask a question to another agent and get a response.\n\nAvailable targets:\n${describeTargets(askRels)}`,
+      description: `Ask a question to any connected agent. If the agent is already running in the pool, the question is routed to their mailbox (no new spawn). Otherwise, a new instance is spawned.\n\nAvailable targets:\n${askTargetDesc}`,
       inputSchema: {
         target: z.string().describe("Agent ID to ask"),
         question: z.string().describe("The question to ask"),
@@ -154,15 +166,24 @@ export async function buildAgentMcpServer(
           targetAgents: targetAgent ? [targetAgent] : [],
         });
 
-        const result = await context.executeAgent({
-          agentId: target,
-          task: question,
-          conversationId: context.conversationId,
-          depth: context.depth + 1,
-          agentInvocations: context.agentInvocations,
-          workingDirectory: context.workingDirectory,
-          signal: context.signal,
-        });
+        // Check if target is already in the pool — route via mailbox
+        const poolInstance = agentPool.get(context.conversationId, target);
+        let result: string;
+        if (poolInstance) {
+          const msgId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          result = await poolInstance.mailbox.send(msgId, question);
+        } else {
+          // Fallback: spawn via executeAgent (which registers in pool)
+          result = await context.executeAgent({
+            agentId: target,
+            task: question,
+            conversationId: context.conversationId,
+            depth: context.depth + 1,
+            agentInvocations: context.agentInvocations,
+            workingDirectory: context.workingDirectory,
+            signal: context.signal,
+          });
+        }
 
         await context.emitActivity(context.conversationId, "tool_result", {
           agentId: agent.id,
@@ -176,104 +197,80 @@ export async function buildAgentMcpServer(
     });
   }
 
-  if (reviewRels.length > 0) {
-    const validIds = reviewRels.map((r) => r.toAgent.id);
-    tools.push({
-      name: "review_work",
-      description: `Send work for peer review.\n\nAvailable targets:\n${describeTargets(reviewRels)}`,
-      inputSchema: {
-        target: z.string().describe("Agent ID to review the work"),
-        content: z.string().describe("The work content to be reviewed"),
-      },
-      handler: async (args: Record<string, unknown>) => {
-        const target = args.target as string;
-        const content = args.content as string;
+  // === Lifecycle tools — all agents get these ===
 
-        if (!validIds.includes(target)) {
-          return { content: [{ type: "text" as const, text: `[Error: Invalid target. Valid IDs: ${validIds.join(", ")}]` }] };
-        }
+  // submit_result: resolve the delegator's promise with the primary result
+  tools.push({
+    name: "submit_result",
+    description: "Submit your completed result to the agent who delegated this task to you. Call this when your work is done. After submitting, you will enter standby mode where you can answer follow-up questions.",
+    inputSchema: {
+      result: z.string().describe("Your completed result/report"),
+    },
+    handler: async (args: Record<string, unknown>) => {
+      const result = args.result as string;
+      const instance = agentPool.get(context.conversationId, agentId);
+      if (instance) {
+        instance.resultResolver(result);
+      }
+      return { content: [{ type: "text" as const, text: "Result submitted. You are now in standby mode. Call wait_for_messages to receive follow-up questions, or end your session." }] };
+    },
+  });
 
-        const targetAgent = await prisma.agent.findUnique({ where: { id: target }, select: { id: true, name: true, role: true } });
-        await context.emitActivity(context.conversationId, "tool_call", {
-          agentId: agent.id,
-          agentName: agent.name,
-          tool: "review_work",
-          input: { target, content: content.slice(0, 200) },
-          targetAgents: targetAgent ? [targetAgent] : [],
-        });
+  // wait_for_messages: block until a question arrives or shutdown
+  tools.push({
+    name: "wait_for_messages",
+    description: "Wait for incoming questions from other agents. Blocks until a message arrives or the job ends. Call this after submit_result to enter standby mode.",
+    inputSchema: {},
+    handler: async () => {
+      const instance = agentPool.get(context.conversationId, agentId);
+      if (!instance) {
+        return { content: [{ type: "text" as const, text: "[No pool instance — session ending]" }] };
+      }
+      const msg = await instance.mailbox.receive();
+      if (msg.id === "__shutdown__") {
+        return { content: [{ type: "text" as const, text: "[Job complete — shutting down]" }] };
+      }
+      // Stash the resolver so respond_to_message can resolve the asker's promise
+      let pending = (instance as unknown as { _pendingResponses?: Map<string, (r: string) => void> })._pendingResponses;
+      if (!pending) {
+        pending = new Map();
+        (instance as unknown as { _pendingResponses: Map<string, (r: string) => void> })._pendingResponses = pending;
+      }
+      pending.set(msg.id, msg.resolve);
+      return { content: [{ type: "text" as const, text: `[Incoming question (messageId: ${msg.id})]:\n${msg.content}\n\nUse respond_to_message with this messageId to reply.` }] };
+    },
+  });
 
-        const result = await context.executeAgent({
-          agentId: target,
-          task: `Please review the following work and provide feedback:\n\n${content}`,
-          conversationId: context.conversationId,
-          depth: context.depth + 1,
-          agentInvocations: context.agentInvocations,
-          workingDirectory: context.workingDirectory,
-          signal: context.signal,
-        });
-
-        await context.emitActivity(context.conversationId, "tool_result", {
-          agentId: agent.id,
-          agentName: agent.name,
-          tool: "review_work",
-          result: result.slice(0, 1000),
-        });
-
-        return { content: [{ type: "text" as const, text: result }] };
-      },
-    });
-  }
-
-  if (summarizeRels.length > 0) {
-    const validIds = summarizeRels.map((r) => r.toAgent.id);
-    tools.push({
-      name: "summarize_for",
-      description: `Report a summary to another agent.\n\nAvailable targets:\n${describeTargets(summarizeRels)}`,
-      inputSchema: {
-        target: z.string().describe("Agent ID to send the summary to"),
-        content: z.string().describe("The summary content"),
-      },
-      handler: async (args: Record<string, unknown>) => {
-        const target = args.target as string;
-        const content = args.content as string;
-
-        if (!validIds.includes(target)) {
-          return { content: [{ type: "text" as const, text: `[Error: Invalid target. Valid IDs: ${validIds.join(", ")}]` }] };
-        }
-
-        const targetAgent = await prisma.agent.findUnique({ where: { id: target }, select: { id: true, name: true, role: true } });
-        await context.emitActivity(context.conversationId, "tool_call", {
-          agentId: agent.id,
-          agentName: agent.name,
-          tool: "summarize_for",
-          input: { target, content: content.slice(0, 200) },
-          targetAgents: targetAgent ? [targetAgent] : [],
-        });
-
-        const result = await context.executeAgent({
-          agentId: target,
-          task: `Here is a summary for your review:\n\n${content}`,
-          conversationId: context.conversationId,
-          depth: context.depth + 1,
-          agentInvocations: context.agentInvocations,
-          workingDirectory: context.workingDirectory,
-          signal: context.signal,
-        });
-
-        await context.emitActivity(context.conversationId, "tool_result", {
-          agentId: agent.id,
-          agentName: agent.name,
-          tool: "summarize_for",
-          result: result.slice(0, 1000),
-        });
-
-        return { content: [{ type: "text" as const, text: result }] };
-      },
-    });
-  }
+  // respond_to_message: answer a question received via mailbox
+  tools.push({
+    name: "respond_to_message",
+    description: "Respond to a question received via wait_for_messages. After responding, call wait_for_messages again to continue standby.",
+    inputSchema: {
+      messageId: z.string().describe("The messageId from the incoming question"),
+      response: z.string().describe("Your response to the question"),
+    },
+    handler: async (args: Record<string, unknown>) => {
+      const messageId = args.messageId as string;
+      const response = args.response as string;
+      const instance = agentPool.get(context.conversationId, agentId);
+      if (!instance) {
+        return { content: [{ type: "text" as const, text: "[No pool instance]" }] };
+      }
+      // The mailbox.send() call from the asker holds a resolve function keyed by messageId.
+      // We need to find and resolve it. The mailbox message object stores the resolver directly.
+      // Since we already delivered the message in wait_for_messages, the resolver is on the message object.
+      // We stash received messages on the instance for this purpose.
+      const pending = (instance as unknown as { _pendingResponses?: Map<string, (r: string) => void> })._pendingResponses;
+      if (pending?.has(messageId)) {
+        pending.get(messageId)!(response);
+        pending.delete(messageId);
+      }
+      return { content: [{ type: "text" as const, text: "Response sent. Call wait_for_messages to continue standby." }] };
+    },
+  });
 
   // Escalation is available to underbosses
-  if (agent.role === "underboss") {
+  if (agent.role === "underboss" || agent.role === "tester") {
     tools.push({
       name: "escalate_to_boss",
       description: "Ask the human user for guidance when you need a decision. Use sparingly.",
@@ -315,7 +312,6 @@ export async function buildAgentMcpServer(
 
   if (tools.length === 0) return null;
 
-  // Cast tools to the expected type — the SDK uses zod raw shapes for inputSchema
   return createSdkMcpServer({
     name: "agentmafia",
     version: "1.0.0",

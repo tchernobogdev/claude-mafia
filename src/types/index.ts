@@ -1,5 +1,5 @@
-export type AgentRole = "underboss" | "capo" | "soldier";
-export type RelationshipAction = "summarize" | "ask" | "review" | "delegate";
+export type AgentRole = "underboss" | "capo" | "soldier" | "tester";
+export type RelationshipAction = "delegate" | "collaborate" | "test";
 export type Cardinality = "1:1" | "1:many" | "many:1";
 export type ConversationStatus = "active" | "completed" | "paused";
 export type EscalationStatus = "pending" | "answered";
@@ -55,7 +55,6 @@ export interface EscalationData {
 
 export const ACTION_CARDINALITY: Record<RelationshipAction, Cardinality> = {
   delegate: "1:many",
-  review: "1:1",
-  ask: "1:1",
-  summarize: "1:1",
+  collaborate: "1:1",
+  test: "1:1",
 };

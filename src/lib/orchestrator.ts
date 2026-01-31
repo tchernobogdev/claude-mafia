@@ -2,6 +2,7 @@ import { prisma } from "./db";
 import { runAgent, type ImageInput } from "./anthropic-agent";
 import { buildAgentMcpServer } from "./mcp-tools";
 import { sseManager } from "./sse";
+import { agentPool, AgentMailbox, type AgentInstance } from "./agent-pool";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -77,6 +78,7 @@ const activeOrchestrations = new Map<string, AbortController>();
 export function cancelOrchestration(conversationId: string): boolean {
   const controller = activeOrchestrations.get(conversationId);
   if (controller) {
+    agentPool.shutdownConversation(conversationId);
     controller.abort();
     activeOrchestrations.delete(conversationId);
     return true;
@@ -114,6 +116,10 @@ Do NOT delegate everything at once unless the tasks are truly independent. Seque
 As a capo, when you receive a task, delegate it to your soldiers. Review their results and compile a report for the underboss. You may send soldiers on multiple rounds (recon first, then implementation).`;
   }
 
+  if (role === "tester") {
+    return base + `\n\nTESTER DIRECTIVE: You are a tester with browser automation capabilities via the --chrome flag. Your job is to verify, test, and validate work done by other agents. You can:\n- Navigate to web pages and interact with the UI\n- Verify visual elements, layouts, and user flows\n- Check console errors, network requests, and page behavior\n- Take screenshots and record test results\n- Report bugs and issues back to the underboss\n\nAfter testing, compile a detailed test report with: what was tested, pass/fail status for each test, any bugs found, and screenshots if relevant.`;
+  }
+
   return base + `
 
 As a soldier, you do the actual hands-on work. You have full access to Claude Code tools: Read files, Write files, use Bash for shell commands, Glob for file searching, and Grep for content searching. Be thorough — read before writing, verify your work. If you have subordinates, use the delegation tools provided via MCP to assign them work.`;
@@ -144,6 +150,14 @@ export async function executeAgent({
   const agent = await prisma.agent.findUnique({ where: { id: agentId } });
   if (!agent) return "[Agent not found]";
 
+  // --- Pool-aware two-path dispatch ---
+  // If agent is already running in pool, route via mailbox
+  const existingInstance = agentPool.get(conversationId, agentId);
+  if (existingInstance) {
+    const msgId = `delegate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return existingInstance.mailbox.send(msgId, task);
+  }
+
   await emitActivity(conversationId, "agent_start", {
     agentId: agent.id,
     agentName: agent.name,
@@ -166,48 +180,96 @@ export async function executeAgent({
   const contextBlock = previousContext
     ? `\n\nPREVIOUS CONTEXT FROM THIS OPERATION:\n${previousContext.summary}\n\nUse this context to inform your work. The boss is following up on a previous request.`
     : "";
-  const systemPrompt = `${basePrompt}\n\n${DELEGATION_DIRECTIVE(agent.role)}\n\n${COMMUNICATION_DIRECTIVE}\n\n${MAFIA_PERSONALITY}${workingDirContext}${contextBlock}`;
+  const lifecycleDirective = `\n\nAGENT LIFECYCLE: After completing your work, call submit_result with your final report. Then call wait_for_messages to enter standby mode where other agents can ask you follow-up questions. When you receive a question via wait_for_messages, answer it using respond_to_message, then call wait_for_messages again.`;
+  const systemPrompt = `${basePrompt}\n\n${DELEGATION_DIRECTIVE(agent.role)}\n\n${COMMUNICATION_DIRECTIVE}\n\n${MAFIA_PERSONALITY}${workingDirContext}${contextBlock}${lifecycleDirective}`;
+
+  // Create abortController for this agent execution
+  const agentAbortController = new AbortController();
+  if (signal) {
+    if (signal.aborted) return "[Job stopped by the boss]";
+    signal.addEventListener("abort", () => agentAbortController.abort(), { once: true });
+  }
+
+  // Create pool instance before starting the agent
+  let resultResolver!: (result: string) => void;
+  const resultPromise = new Promise<string>((resolve) => {
+    resultResolver = resolve;
+  });
+  const instance: AgentInstance = {
+    agentId,
+    mailbox: new AgentMailbox(),
+    resultPromise,
+    resultResolver,
+    abortController: agentAbortController,
+    queryPromise: Promise.resolve(""), // will be set below
+  };
+  agentPool.register(conversationId, instance);
 
   // Build MCP server with delegation tools scoped to this agent's relationships
   const mcpServer = await buildAgentMcpServer(agentId, {
     conversationId,
+    agentId,
     depth,
     agentInvocations,
     workingDirectory,
     signal,
+    abortController: agentAbortController,
     executeAgent,
     emitActivity,
   });
 
-  let result: string;
-  try {
-    const agentResult = await runAgent({
-      prompt: task,
-      systemPrompt,
-      model: agent.model,
-      role: agent.role,
-      workingDirectory,
-      signal,
-      mcpServer,
-      onDelta: (delta) => {
-        sseManager.emit(conversationId, "agent_stream", {
-          agentId: agent.id,
-          agentName: agent.name,
-          delta,
-        });
-      },
-    });
-    result = agentResult.text;
-  } catch (err) {
-    result = `[Agent error]: ${err instanceof Error ? err.message : String(err)}`;
-    console.error(`[AgentMafia] Agent error for ${agent.name}:`, err);
-    await emitActivity(conversationId, "agent_error", {
-      agentId: agent.id,
-      agentName: agent.name,
-      error: result,
-    });
-    return result;
-  }
+  // Start query in background — agent stays alive until maxTurns or shutdown
+  const queryPromise = (async () => {
+    try {
+      const agentResult = await runAgent({
+        prompt: task,
+        systemPrompt,
+        model: agent.model,
+        role: agent.role,
+        workingDirectory,
+        maxTurns: 200,
+        signal,
+        abortController: agentAbortController,
+        mcpServer,
+        onToolUse: (toolName, toolInput) => {
+          emitActivity(conversationId, "tool_call", {
+            agentId: agent.id,
+            agentName: agent.name,
+            tool: toolName,
+            input: typeof toolInput === 'object' ? toolInput : { value: toolInput },
+          });
+        },
+        onDelta: (delta) => {
+          sseManager.emit(conversationId, "agent_stream", {
+            agentId: agent.id,
+            agentName: agent.name,
+            delta,
+          });
+        },
+      });
+      return agentResult.text;
+    } catch (err) {
+      const errMsg = `[Agent error]: ${err instanceof Error ? err.message : String(err)}`;
+      console.error(`[AgentMafia] Agent error for ${agent.name}:`, err);
+      await emitActivity(conversationId, "agent_error", {
+        agentId: agent.id,
+        agentName: agent.name,
+        error: errMsg,
+      });
+      return errMsg;
+    }
+  })();
+  instance.queryPromise = queryPromise;
+
+  // Fallback: if query ends without submit_result, resolve with last text
+  queryPromise.then((lastText) => {
+    // If resultPromise hasn't been resolved yet, resolve it now
+    resultResolver(lastText);
+    agentPool.remove(conversationId, agentId);
+  });
+
+  // Wait for the agent to submit_result (or for query to end as fallback)
+  const result = await resultPromise;
 
   // Emit final message
   await emitActivity(conversationId, "agent_message", {
@@ -330,6 +392,7 @@ async function runOrchestration(
       sseManager.emit(conversationId, "task_complete", { result });
     }
   } finally {
+    agentPool.shutdownConversation(conversationId);
     activeOrchestrations.delete(conversationId);
   }
 }

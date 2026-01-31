@@ -34,7 +34,7 @@ interface AgentListItem {
   role: string;
 }
 
-const ACTIONS: RelationshipAction[] = ["delegate", "ask", "review", "summarize"];
+const ACTIONS: RelationshipAction[] = ["delegate", "collaborate", "test"];
 const CARDINALITY_LABELS: Record<string, string> = {
   "1:1": "1:1",
   "1:many": "1:many",
@@ -167,6 +167,7 @@ export default function AgentConfigPage() {
               <option value="underboss">Underboss</option>
               <option value="capo">Capo</option>
               <option value="soldier">Soldier</option>
+              <option value="tester">Tester</option>
             </select>
           </div>
           <div>
