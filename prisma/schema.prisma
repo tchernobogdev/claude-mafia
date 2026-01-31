@@ -41,13 +41,14 @@ model Relationship {
 }
 
 model Conversation {
-  id        String    @id @default(cuid())
-  title     String    @default("New Task")
-  status    String    @default("active") // "active" | "completed" | "paused"
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  messages  Message[]
-  escalations Escalation[]
+  id               String    @id @default(cuid())
+  title            String    @default("New Task")
+  status           String    @default("active") // "active" | "completed" | "paused"
+  workingDirectory String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  messages         Message[]
+  escalations      Escalation[]
 }
 
 model Message {

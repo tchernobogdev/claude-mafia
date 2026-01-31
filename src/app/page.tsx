@@ -16,6 +16,7 @@ export default function Dashboard() {
   const router = useRouter();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [task, setTask] = useState("");
+  const [workingDir, setWorkingDir] = useState("");
   const [images, setImages] = useState<{ type: "base64"; media_type: string; data: string; name: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -72,6 +73,7 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const payload: Record<string, unknown> = { task };
+      if (workingDir.trim()) payload.workingDirectory = workingDir.trim();
       if (images.length > 0) {
         payload.images = images.map(({ type, media_type, data }) => ({ type, media_type, data }));
       }
@@ -117,6 +119,25 @@ export default function Dashboard() {
           }}
           onPaste={handlePaste}
         />
+        <div className="flex gap-2">
+          <input
+            value={workingDir}
+            onChange={(e) => setWorkingDir(e.target.value)}
+            placeholder="C:\path\to\project (optional working directory)"
+            className="flex-1 bg-bg border border-border rounded px-3 py-1.5 text-xs text-text placeholder:text-text-muted focus:outline-none focus:border-accent"
+          />
+          <button
+            type="button"
+            onClick={async () => {
+              const res = await fetch("/api/browse-folder", { method: "POST" });
+              const data = await res.json();
+              if (data.path) setWorkingDir(data.path);
+            }}
+            className="text-xs text-text-muted hover:text-text border border-border hover:border-accent px-3 py-1.5 rounded transition-colors whitespace-nowrap"
+          >
+            Browse...
+          </button>
+        </div>
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {images.map((img, i) => (

@@ -3,6 +3,7 @@ import { runAgent, type ImageInput } from "./anthropic-agent";
 import { buildAgentPromptTools } from "./tools";
 import { escalationManager } from "./escalation";
 import { sseManager } from "./sse";
+import { readFileAction, writeFileAction, listFilesAction, runCommandAction } from "./filesystem";
 
 interface ExecuteOptions {
   agentId: string;
@@ -11,6 +12,7 @@ interface ExecuteOptions {
   depth?: number;
   visitedAgentIds?: Set<string>;
   images?: ImageInput[];
+  workingDirectory?: string;
 }
 
 interface AgentAction {
@@ -20,6 +22,8 @@ interface AgentAction {
   task?: string;
   question?: string;
   content?: string;
+  path?: string;
+  command?: string;
 }
 
 const MAFIA_PERSONALITY = `PERSONALITY DIRECTIVE: You talk like a member of the Soprano crime family. Use Italian-American slang, mafia lingo, and Jersey attitude. Say things like "capisce?", "fuggedaboutit", "this thing of ours", "whaddya gonna do", "madone!", "stugots". Refer to tasks as "jobs" or "pieces of work". Call colleagues by their role — "the boss", "the underboss", "capo", "soldier". Be colorful but still get the actual work done correctly. Never break character.`;
@@ -55,6 +59,7 @@ export async function executeAgent({
   depth = 0,
   visitedAgentIds = new Set(),
   images,
+  workingDirectory,
 }: ExecuteOptions): Promise<string> {
   if (depth > 5) return "[Max delegation depth reached]";
 
@@ -74,11 +79,14 @@ export async function executeAgent({
   });
 
   // Build system prompt
-  const toolPrompt = await buildAgentPromptTools(agentId);
+  const toolPrompt = await buildAgentPromptTools(agentId, workingDirectory);
   const basePrompt =
     agent.systemPrompt ||
     `You are ${agent.name}, a ${agent.role} in the organization. ${agent.specialty ? `Your specialty is: ${agent.specialty}.` : ""}`;
-  const systemPrompt = `${basePrompt}\n\n${DELEGATION_DIRECTIVE(agent.role)}\n\n${MAFIA_PERSONALITY}${toolPrompt}`;
+  const workingDirContext = workingDirectory
+    ? `\n\nWORKING DIRECTORY: This task has a project directory at "${workingDirectory}". Soldiers have file tools (read_file, write_file, list_files, run_command) to work with files in this directory. When delegating, make sure to mention the working directory context so subordinates know to use their file tools.`
+    : "";
+  const systemPrompt = `${basePrompt}\n\n${DELEGATION_DIRECTIVE(agent.role)}\n\n${MAFIA_PERSONALITY}${workingDirContext}${toolPrompt}`;
 
   let result: string;
   try {
@@ -132,6 +140,7 @@ export async function executeAgent({
               conversationId,
               depth: depth + 1,
               visitedAgentIds,
+              workingDirectory,
             })
           )
         );
@@ -149,6 +158,7 @@ export async function executeAgent({
           conversationId,
           depth: depth + 1,
           visitedAgentIds,
+          workingDirectory,
         });
         break;
       }
@@ -161,6 +171,7 @@ export async function executeAgent({
           conversationId,
           depth: depth + 1,
           visitedAgentIds,
+          workingDirectory,
         });
         break;
       }
@@ -173,7 +184,32 @@ export async function executeAgent({
           conversationId,
           depth: depth + 1,
           visitedAgentIds,
+          workingDirectory,
         });
+        break;
+      }
+
+      case "read_file": {
+        if (!workingDirectory) { actionResult = "[No working directory set]"; break; }
+        actionResult = await readFileAction(workingDirectory, action.path || "");
+        break;
+      }
+
+      case "write_file": {
+        if (!workingDirectory) { actionResult = "[No working directory set]"; break; }
+        actionResult = await writeFileAction(workingDirectory, action.path || "", action.content || "");
+        break;
+      }
+
+      case "list_files": {
+        if (!workingDirectory) { actionResult = "[No working directory set]"; break; }
+        actionResult = await listFilesAction(workingDirectory, action.path);
+        break;
+      }
+
+      case "run_command": {
+        if (!workingDirectory) { actionResult = "[No working directory set]"; break; }
+        actionResult = await runCommandAction(workingDirectory, action.command || "");
         break;
       }
 
@@ -259,7 +295,7 @@ export async function executeAgent({
   return result;
 }
 
-export async function startTask(task: string, images?: ImageInput[]): Promise<string> {
+export async function startTask(task: string, images?: ImageInput[], workingDirectory?: string): Promise<string> {
   const underbosses = await prisma.agent.findMany({
     where: { role: "underboss" },
   });
@@ -269,14 +305,19 @@ export async function startTask(task: string, images?: ImageInput[]): Promise<st
   }
 
   const conversation = await prisma.conversation.create({
-    data: { title: task.slice(0, 100) },
+    data: { title: task.slice(0, 100), workingDirectory },
   });
+
+  const userMeta: Record<string, unknown> = {};
+  if (images && images.length > 0) userMeta.images = images;
+  if (workingDirectory) userMeta.workingDirectory = workingDirectory;
 
   await prisma.message.create({
     data: {
       conversationId: conversation.id,
       role: "user",
       content: task,
+      metadata: Object.keys(userMeta).length > 0 ? JSON.stringify(userMeta) : null,
     },
   });
 
@@ -284,7 +325,7 @@ export async function startTask(task: string, images?: ImageInput[]): Promise<st
 
   // Run orchestration in background — don't block the HTTP response
   const underboss = underbosses[0];
-  runOrchestration(underboss.id, task, conversation.id, images).catch((err) => {
+  runOrchestration(underboss.id, task, conversation.id, images, workingDirectory).catch((err) => {
     console.error("Orchestration failed:", err);
     sseManager.emit(conversation.id, "task_error", {
       error: err instanceof Error ? err.message : String(err),
@@ -301,9 +342,10 @@ async function runOrchestration(
   agentId: string,
   task: string,
   conversationId: string,
-  images?: ImageInput[]
+  images?: ImageInput[],
+  workingDirectory?: string
 ): Promise<void> {
-  const result = await executeAgent({ agentId, task, conversationId, images });
+  const result = await executeAgent({ agentId, task, conversationId, images, workingDirectory });
 
   await prisma.conversation.update({
     where: { id: conversationId },
@@ -311,4 +353,52 @@ async function runOrchestration(
   });
 
   sseManager.emit(conversationId, "task_complete", { result });
+}
+
+export async function continueTask(
+  conversationId: string,
+  followUp: string,
+  images?: ImageInput[]
+): Promise<void> {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+  });
+  if (!conversation) throw new Error("Conversation not found");
+
+  const underbosses = await prisma.agent.findMany({
+    where: { role: "underboss" },
+  });
+  if (underbosses.length === 0) throw new Error("No underboss configured.");
+
+  const userMeta: Record<string, unknown> = {};
+  if (images && images.length > 0) userMeta.images = images;
+
+  await prisma.message.create({
+    data: {
+      conversationId,
+      role: "user",
+      content: followUp,
+      metadata: Object.keys(userMeta).length > 0 ? JSON.stringify(userMeta) : null,
+    },
+  });
+
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { status: "active" },
+  });
+
+  sseManager.emit(conversationId, "task_start", { task: followUp });
+
+  const underboss = underbosses[0];
+  const workingDirectory = conversation.workingDirectory || undefined;
+
+  runOrchestration(underboss.id, followUp, conversationId, images, workingDirectory).catch((err) => {
+    console.error("Orchestration failed:", err);
+    sseManager.emit(conversationId, "task_error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    prisma.conversation
+      .update({ where: { id: conversationId }, data: { status: "failed" } })
+      .catch(console.error);
+  });
 }

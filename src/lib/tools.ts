@@ -4,7 +4,7 @@ import { prisma } from "./db";
  * Build a prompt section describing available agents and actions for an agent.
  * Used instead of Anthropic tool schemas — CLI agents use a text-based protocol.
  */
-export async function buildAgentPromptTools(agentId: string): Promise<string> {
+export async function buildAgentPromptTools(agentId: string, workingDirectory?: string): Promise<string> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     include: {
@@ -59,6 +59,21 @@ export async function buildAgentPromptTools(agentId: string): Promise<string> {
   if (agent.role === "underboss") {
     sections.push(
       `**ESCALATE TO BOSS** — Ask the human user for guidance (use sparingly):\nTo escalate, output:\n~~~agentmafia\n{"action":"escalate_to_boss","question":"<your question>"}\n~~~`
+    );
+  }
+
+  if (agent.role === "soldier" && workingDirectory) {
+    sections.push(
+      `**READ FILE** — Read a file from the working directory (${workingDirectory}):\nTo read, output:\n~~~agentmafia\n{"action":"read_file","path":"<relative path>"}\n~~~`
+    );
+    sections.push(
+      `**WRITE FILE** — Write/create a file in the working directory:\nTo write, output:\n~~~agentmafia\n{"action":"write_file","path":"<relative path>","content":"<file content>"}\n~~~`
+    );
+    sections.push(
+      `**LIST FILES** — List files in the working directory (or a subdirectory):\nTo list, output:\n~~~agentmafia\n{"action":"list_files","path":"<optional relative subpath>"}\n~~~`
+    );
+    sections.push(
+      `**RUN COMMAND** — Run a shell command in the working directory:\nTo run, output:\n~~~agentmafia\n{"action":"run_command","command":"<shell command>"}\n~~~`
     );
   }
 
