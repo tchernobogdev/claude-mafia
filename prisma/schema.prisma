@@ -1,0 +1,74 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Agent {
+  id           String   @id @default(cuid())
+  name         String
+  role         String   // "underboss" | "capo" | "soldier"
+  specialty    String?
+  systemPrompt String   @default("")
+  model        String   @default("claude-sonnet-4-5-20250929")
+  parentId     String?
+  parent       Agent?   @relation("Hierarchy", fields: [parentId], references: [id])
+  children     Agent[]  @relation("Hierarchy")
+  posX         Float    @default(100)
+  posY         Float    @default(100)
+  orderIndex   Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  outgoingRels Relationship[] @relation("FromAgent")
+  incomingRels Relationship[] @relation("ToAgent")
+  messages     Message[]
+}
+
+model Relationship {
+  id          String @id @default(cuid())
+  fromAgentId String
+  toAgentId   String
+  action      String // "summarize" | "ask" | "review" | "delegate"
+  cardinality String @default("1:1") // "1:1" | "1:many" | "many:1"
+  fromAgent   Agent  @relation("FromAgent", fields: [fromAgentId], references: [id], onDelete: Cascade)
+  toAgent     Agent  @relation("ToAgent", fields: [toAgentId], references: [id], onDelete: Cascade)
+
+  @@unique([fromAgentId, toAgentId, action])
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  title     String    @default("New Task")
+  status    String    @default("active") // "active" | "completed" | "paused"
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+  escalations Escalation[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agentId        String?
+  agent          Agent?       @relation(fields: [agentId], references: [id])
+  role           String       // "user" | "assistant" | "system" | "escalation"
+  content        String
+  metadata       String?      // JSON
+  createdAt      DateTime     @default(now())
+}
+
+model Escalation {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  fromAgentId    String
+  question       String
+  answer         String?
+  status         String       @default("pending") // "pending" | "answered"
+  createdAt      DateTime     @default(now())
+}
