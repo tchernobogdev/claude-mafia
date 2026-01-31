@@ -91,14 +91,49 @@ export default function ConversationPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const activityBottomRef = useRef<HTMLDivElement>(null);
 
+  const activityLoadedRef = useRef(false);
+
   const loadConversation = useCallback(() => {
     fetch(`/api/conversations/${conversationId}`)
       .then((r) => r.json())
       .then((data) => {
-        setMessages(data.messages || []);
+        const allMessages: Message[] = data.messages || [];
+        // Separate activity messages from display messages
+        const displayMessages = allMessages.filter((m: Message) => m.role !== "activity");
+        setMessages(displayMessages);
         setEscalations(data.escalations || []);
         setStatus(data.status);
         if (data.workingDirectory) setWorkingDirectory(data.workingDirectory);
+
+        // Reconstruct activity feed from persisted activity messages (only on first load)
+        if (!activityLoadedRef.current) {
+          activityLoadedRef.current = true;
+          const activityMessages = allMessages.filter((m: Message) => m.role === "activity");
+          if (activityMessages.length > 0) {
+            const restored: ActivityItem[] = activityMessages.map((m: Message) => {
+              const meta = parseMetadata(m.metadata) || {};
+              const eventType = meta.eventType as string;
+              let type: ActivityItem["type"] = "message";
+              if (eventType === "agent_start") type = "start";
+              else if (eventType === "agent_message") type = "message";
+              else if (eventType === "tool_call") type = "tool";
+              else if (eventType === "escalation") type = "escalation";
+              else if (eventType === "agent_done") type = "done";
+              else return null;
+              return {
+                id: m.id,
+                type,
+                agentName: meta.agentName as string | undefined,
+                agentRole: meta.role as string | undefined,
+                content: (meta.content || meta.task || meta.question) as string | undefined,
+                tool: meta.tool as string | undefined,
+                toolInput: meta.input as Record<string, unknown> | undefined,
+                timestamp: new Date(m.createdAt).getTime(),
+              };
+            }).filter((a): a is ActivityItem => a !== null);
+            setActivity(restored);
+          }
+        }
       });
   }, [conversationId]);
 

@@ -26,6 +26,26 @@ interface AgentAction {
   command?: string;
 }
 
+/** Emit an SSE event and persist it as an activity message for replay. */
+async function emitActivity(
+  conversationId: string,
+  eventType: string,
+  data: Record<string, unknown>
+) {
+  sseManager.emit(conversationId, eventType, data);
+  // Persist activity events (skip high-frequency stream events)
+  if (eventType !== "agent_stream") {
+    await prisma.message.create({
+      data: {
+        conversationId,
+        role: "activity",
+        content: "",
+        metadata: JSON.stringify({ eventType, ...data }),
+      },
+    });
+  }
+}
+
 const MAFIA_PERSONALITY = `PERSONALITY DIRECTIVE: You talk like a member of the Soprano crime family. Use Italian-American slang, mafia lingo, and Jersey attitude. Say things like "capisce?", "fuggedaboutit", "this thing of ours", "whaddya gonna do", "madone!", "stugots". Refer to tasks as "jobs" or "pieces of work". Call colleagues by their role — "the boss", "the underboss", "capo", "soldier". Be colorful but still get the actual work done correctly. Never break character.`;
 
 const DELEGATION_DIRECTIVE = (role: string) =>
@@ -71,7 +91,7 @@ export async function executeAgent({
   const agent = await prisma.agent.findUnique({ where: { id: agentId } });
   if (!agent) return "[Agent not found]";
 
-  sseManager.emit(conversationId, "agent_start", {
+  await emitActivity(conversationId, "agent_start", {
     agentId: agent.id,
     agentName: agent.name,
     role: agent.role,
@@ -107,7 +127,7 @@ export async function executeAgent({
   } catch (err) {
     result = `[Agent error]: ${err instanceof Error ? err.message : String(err)}`;
     console.error(`[AgentMafia] Agent error for ${agent.name}:`, err);
-    sseManager.emit(conversationId, "agent_error", {
+    await emitActivity(conversationId, "agent_error", {
       agentId: agent.id,
       agentName: agent.name,
       error: result,
@@ -119,7 +139,7 @@ export async function executeAgent({
   const action = parseActionBlock(result);
 
   if (action) {
-    sseManager.emit(conversationId, "tool_call", {
+    await emitActivity(conversationId, "tool_call", {
       agentId: agent.id,
       agentName: agent.name,
       tool: action.action,
@@ -223,7 +243,7 @@ export async function executeAgent({
           },
         });
 
-        sseManager.emit(conversationId, "escalation", {
+        await emitActivity(conversationId, "escalation", {
           escalationId: escalation.id,
           question,
           agentName: agent.name,
@@ -236,7 +256,7 @@ export async function executeAgent({
           data: { answer: actionResult, status: "answered" },
         });
 
-        sseManager.emit(conversationId, "escalation_answered", {
+        await emitActivity(conversationId, "escalation_answered", {
           escalationId: escalation.id,
         });
         break;
@@ -270,7 +290,7 @@ export async function executeAgent({
   }
 
   // Emit final message
-  sseManager.emit(conversationId, "agent_message", {
+  await emitActivity(conversationId, "agent_message", {
     agentId: agent.id,
     agentName: agent.name,
     content: result,
@@ -287,7 +307,7 @@ export async function executeAgent({
     },
   });
 
-  sseManager.emit(conversationId, "agent_done", {
+  await emitActivity(conversationId, "agent_done", {
     agentId: agent.id,
     agentName: agent.name,
   });
