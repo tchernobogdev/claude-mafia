@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { ActivityTree, type TreeActivityItem } from "../../../components/activity-tree";
 
 interface Message {
   id: string;
@@ -30,16 +31,26 @@ interface SSEEvent {
   question?: string;
   escalationId?: string;
   result?: string;
+  targetAgents?: TargetAgent[];
+}
+
+interface TargetAgent {
+  id: string;
+  name: string;
+  role: string;
 }
 
 interface ActivityItem {
   id: string;
-  type: "start" | "message" | "tool" | "escalation" | "done";
+  type: "start" | "message" | "tool" | "tool_result" | "escalation" | "done";
+  agentId?: string;
   agentName?: string;
   agentRole?: string;
   content?: string;
   tool?: string;
   toolInput?: Record<string, unknown>;
+  toolResult?: string;
+  targetAgents?: TargetAgent[];
   timestamp: number;
 }
 
@@ -88,6 +99,12 @@ export default function ConversationPage() {
   const [stepIndex, setStepIndex] = useState(-1);
   const [isStepMode, setIsStepMode] = useState(false);
 
+  // Activity detail panel
+  const [selectedActivity, setSelectedActivity] = useState<ActivityItem | null>(null);
+
+  // Activity view mode: list or tree
+  const [activityView, setActivityView] = useState<"list" | "tree">("list");
+
   const bottomRef = useRef<HTMLDivElement>(null);
   const activityBottomRef = useRef<HTMLDivElement>(null);
 
@@ -110,24 +127,28 @@ export default function ConversationPage() {
           activityLoadedRef.current = true;
           const activityMessages = allMessages.filter((m: Message) => m.role === "activity");
           if (activityMessages.length > 0) {
-            const restored: ActivityItem[] = activityMessages.map((m: Message) => {
+            const restored = activityMessages.map((m: Message): ActivityItem | null => {
               const meta = parseMetadata(m.metadata) || {};
               const eventType = meta.eventType as string;
               let type: ActivityItem["type"] = "message";
               if (eventType === "agent_start") type = "start";
               else if (eventType === "agent_message") type = "message";
               else if (eventType === "tool_call") type = "tool";
+              else if (eventType === "tool_result") type = "tool_result";
               else if (eventType === "escalation") type = "escalation";
               else if (eventType === "agent_done") type = "done";
               else return null;
               return {
                 id: m.id,
                 type,
+                agentId: meta.agentId as string | undefined,
                 agentName: meta.agentName as string | undefined,
                 agentRole: meta.role as string | undefined,
                 content: (meta.content || meta.task || meta.question) as string | undefined,
                 tool: meta.tool as string | undefined,
                 toolInput: meta.input as Record<string, unknown> | undefined,
+                toolResult: meta.result as string | undefined,
+                targetAgents: meta.targetAgents as TargetAgent[] | undefined,
                 timestamp: new Date(m.createdAt).getTime(),
               };
             }).filter((a): a is ActivityItem => a !== null);
@@ -149,28 +170,33 @@ export default function ConversationPage() {
 
     evtSource.addEventListener("agent_message", (e) => {
       const data: SSEEvent = JSON.parse(e.data);
-      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "message", agentName: data.agentName, content: data.content, timestamp: Date.now() }]);
+      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "message", agentId: data.agentId, agentName: data.agentName, content: data.content, timestamp: Date.now() }]);
       loadConversation();
     });
 
     evtSource.addEventListener("agent_start", (e) => {
       const data: SSEEvent = JSON.parse(e.data);
-      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "start", agentName: data.agentName, agentRole: data.role, content: data.task, timestamp: Date.now() }]);
+      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "start", agentId: data.agentId, agentName: data.agentName, agentRole: data.role, content: data.task, timestamp: Date.now() }]);
     });
 
     evtSource.addEventListener("agent_done", (e) => {
       const data: SSEEvent = JSON.parse(e.data);
-      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "done", agentName: data.agentName, timestamp: Date.now() }]);
+      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "done", agentId: data.agentId, agentName: data.agentName, timestamp: Date.now() }]);
     });
 
     evtSource.addEventListener("tool_call", (e) => {
-      const data: SSEEvent = JSON.parse(e.data);
-      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "tool", agentName: data.agentName, tool: data.tool, toolInput: data.input, timestamp: Date.now() }]);
+      const data = JSON.parse(e.data);
+      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "tool", agentId: data.agentId, agentName: data.agentName, tool: data.tool, toolInput: data.input, targetAgents: data.targetAgents, timestamp: Date.now() }]);
+    });
+
+    evtSource.addEventListener("tool_result", (e) => {
+      const data = JSON.parse(e.data);
+      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "tool_result", agentId: data.agentId, agentName: data.agentName, tool: data.tool, toolResult: data.result, timestamp: Date.now() }]);
     });
 
     evtSource.addEventListener("escalation", (e) => {
       const data: SSEEvent = JSON.parse(e.data);
-      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "escalation", agentName: data.agentName, content: data.question, timestamp: Date.now() }]);
+      setActivity((prev) => [...prev, { id: crypto.randomUUID(), type: "escalation", agentId: data.agentId, agentName: data.agentName, content: data.question, timestamp: Date.now() }]);
       setEscalations((prev) => [...prev, { id: data.escalationId!, question: data.question!, status: "pending" }]);
     });
 
@@ -181,6 +207,11 @@ export default function ConversationPage() {
 
     evtSource.addEventListener("task_complete", () => {
       setStatus("completed");
+      loadConversation();
+    });
+
+    evtSource.addEventListener("task_stopped", () => {
+      setStatus("stopped");
       loadConversation();
     });
 
@@ -275,17 +306,28 @@ export default function ConversationPage() {
           )}
         </div>
         <div className="flex items-center gap-3">
+          {status === "active" && (
+            <button
+              onClick={async () => {
+                await fetch(`/api/conversations/${conversationId}`, { method: "PATCH" });
+                setStatus("stopped");
+              }}
+              className="text-danger text-xs hover:bg-danger/10 px-3 py-1.5 rounded border border-danger/30 transition-colors font-medium"
+            >
+              Stop Job
+            </button>
+          )}
           <button
             onClick={async () => {
               if (!confirm("Delete this operation?")) return;
               await fetch(`/api/conversations/${conversationId}`, { method: "DELETE" });
               router.push("/");
             }}
-            className="text-danger text-xs hover:bg-danger/10 px-3 py-1.5 rounded border border-danger/30 transition-colors"
+            className="text-text-muted text-xs hover:bg-danger/10 hover:text-danger px-3 py-1.5 rounded border border-border hover:border-danger/30 transition-colors"
           >
             Delete
           </button>
-          {status === "completed" && (
+          {(status === "completed" || status === "stopped") && (
             <a
               href={`/conversation/${conversationId}/report`}
               className="text-xs px-3 py-1.5 rounded border border-accent text-accent hover:bg-accent hover:text-white transition-colors"
@@ -293,7 +335,7 @@ export default function ConversationPage() {
               View Report
             </a>
           )}
-          {status === "completed" && activity.length > 0 && (
+          {(status === "completed" || status === "stopped") && activity.length > 0 && (
             <button
               onClick={isStepMode ? exitStepMode : enterStepMode}
               className={`text-xs px-3 py-1.5 rounded border transition-colors ${
@@ -303,7 +345,7 @@ export default function ConversationPage() {
               {isStepMode ? "Exit Step-Through" : "Step-Through Replay"}
             </button>
           )}
-          <span className={`text-xs px-2 py-0.5 rounded ${status === "active" ? "bg-accent/20 text-accent" : status === "completed" ? "bg-success/20 text-success" : "bg-border text-text-muted"}`}>
+          <span className={`text-xs px-2 py-0.5 rounded ${status === "active" ? "bg-accent/20 text-accent" : status === "completed" ? "bg-success/20 text-success" : status === "stopped" ? "bg-danger/20 text-danger" : "bg-border text-text-muted"}`}>
             {status}
           </span>
         </div>
@@ -450,32 +492,155 @@ export default function ConversationPage() {
         </div>
 
         {/* Activity Feed */}
-        <div className="bg-bg-card border border-border rounded-lg p-4 max-h-[70vh] overflow-y-auto">
-          <h2 className="text-xs text-text-muted font-medium mb-3">
-            Activity {isStepMode && `(${stepIndex + 1}/${activity.length})`}
-          </h2>
-          <div className="space-y-1.5">
-            {visibleActivity.length === 0 && <p className="text-xs text-text-muted">Waiting for activity...</p>}
-            {visibleActivity.map((item, i) => {
-              const isCurrentStep = isStepMode && i === stepIndex;
-              return (
-                <div
-                  key={item.id}
-                  className={`text-xs p-1.5 rounded transition-colors cursor-pointer ${isCurrentStep ? "bg-accent/10 border border-accent/30" : "hover:bg-bg-hover"}`}
-                  onClick={() => { if (isStepMode) setStepIndex(i); }}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-accent">{item.agentName}</span>
-                    <StepTypeBadge type={item.type} tool={item.tool} />
-                  </div>
-                  {item.type === "message" && <p className="text-text-muted mt-0.5 truncate">{item.content}</p>}
-                  {item.type === "start" && <p className="text-text-muted mt-0.5 truncate">Task: {item.content}</p>}
-                  {item.type === "tool" && item.toolInput && <p className="text-text-muted mt-0.5 truncate">{JSON.stringify(item.toolInput).slice(0, 80)}</p>}
-                </div>
-              );
-            })}
-            <div ref={activityBottomRef} />
+        <div className="bg-bg-card border border-border rounded-lg flex flex-col max-h-[70vh]">
+          {/* View toggle header */}
+          <div className="px-4 pt-3 pb-1 flex items-center justify-between border-b border-border">
+            <h2 className="text-xs text-text-muted font-medium">
+              Activity {isStepMode && `(${stepIndex + 1}/${activity.length})`}
+            </h2>
+            <div className="flex items-center gap-0.5 bg-bg rounded p-0.5">
+              <button
+                onClick={() => setActivityView("list")}
+                className={`text-[10px] px-2 py-0.5 rounded transition-colors ${activityView === "list" ? "bg-accent/20 text-accent" : "text-text-muted hover:text-text"}`}
+              >
+                List
+              </button>
+              <button
+                onClick={() => setActivityView("tree")}
+                className={`text-[10px] px-2 py-0.5 rounded transition-colors ${activityView === "tree" ? "bg-accent/20 text-accent" : "text-text-muted hover:text-text"}`}
+              >
+                Tree
+              </button>
+            </div>
           </div>
+
+          {/* Tree view */}
+          {activityView === "tree" && (
+            <div className="flex-1 overflow-y-auto p-2" style={{ background: "#08080f" }}>
+              <ActivityTree activity={activity as TreeActivityItem[]} />
+            </div>
+          )}
+
+          {/* List view */}
+          {activityView === "list" && <div className="p-4 flex-1 overflow-y-auto">
+            <div className="space-y-1.5">
+              {visibleActivity.length === 0 && <p className="text-xs text-text-muted">Waiting for activity...</p>}
+              {visibleActivity.map((item, i) => {
+                const isCurrentStep = isStepMode && i === stepIndex;
+                const isSelected = selectedActivity?.id === item.id;
+                return (
+                  <div
+                    key={item.id}
+                    className={`text-xs p-1.5 rounded transition-colors cursor-pointer ${isCurrentStep ? "bg-accent/10 border border-accent/30" : isSelected ? "bg-accent/10 border border-accent/20" : "hover:bg-bg-hover"}`}
+                    onClick={() => {
+                      if (isStepMode) setStepIndex(i);
+                      setSelectedActivity(isSelected ? null : item);
+                    }}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-accent">{item.agentName}</span>
+                      <StepTypeBadge type={item.type} tool={item.tool} />
+                    </div>
+                    {item.type === "message" && <p className="text-text-muted mt-0.5 truncate">{item.content}</p>}
+                    {item.type === "start" && <p className="text-text-muted mt-0.5 truncate">Task: {item.content}</p>}
+                    {item.type === "tool" && item.targetAgents && item.targetAgents.length > 0 && (
+                      <p className="text-text-muted mt-0.5 truncate">→ {item.targetAgents.map((a) => a.name).join(", ")}</p>
+                    )}
+                    {item.type === "tool" && !item.targetAgents && item.toolInput && <p className="text-text-muted mt-0.5 truncate">{JSON.stringify(item.toolInput).slice(0, 80)}</p>}
+                    {item.type === "tool_result" && <p className="text-text-muted mt-0.5 truncate">{item.toolResult?.slice(0, 80)}</p>}
+                  </div>
+                );
+              })}
+              <div ref={activityBottomRef} />
+            </div>
+          </div>}
+
+          {/* Activity Detail Panel */}
+          {activityView === "list" && selectedActivity && (
+            <div className="border-t border-border p-3 max-h-[35vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-accent text-xs font-medium">{selectedActivity.agentName}</span>
+                  <StepTypeBadge type={selectedActivity.type} tool={selectedActivity.tool} />
+                </div>
+                <button onClick={() => setSelectedActivity(null)} className="text-text-muted hover:text-text text-xs">&times;</button>
+              </div>
+
+              {selectedActivity.type === "start" && (
+                <div className="space-y-2">
+                  <div>
+                    <span className="text-[10px] text-text-muted uppercase">Task Received</span>
+                    <p className="text-xs whitespace-pre-wrap bg-bg rounded p-2 mt-0.5 max-h-40 overflow-y-auto">{selectedActivity.content}</p>
+                  </div>
+                  {selectedActivity.agentRole && (
+                    <div>
+                      <span className="text-[10px] text-text-muted uppercase">Role</span>
+                      <p className="text-xs mt-0.5" style={{ color: ROLE_COLORS[selectedActivity.agentRole] || "#6a6a7a" }}>{selectedActivity.agentRole}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {selectedActivity.type === "message" && (
+                <div>
+                  <span className="text-[10px] text-text-muted uppercase">Full Response</span>
+                  <p className="text-xs whitespace-pre-wrap bg-bg rounded p-2 mt-0.5 max-h-60 overflow-y-auto">{selectedActivity.content}</p>
+                </div>
+              )}
+
+              {selectedActivity.type === "tool" && (
+                <div className="space-y-2">
+                  <div>
+                    <span className="text-[10px] text-text-muted uppercase">Action</span>
+                    <p className="text-xs mt-0.5">{TOOL_LABELS[selectedActivity.tool || ""] || selectedActivity.tool}</p>
+                  </div>
+                  {selectedActivity.targetAgents && selectedActivity.targetAgents.length > 0 && (
+                    <div>
+                      <span className="text-[10px] text-text-muted uppercase">Delegated To</span>
+                      <div className="mt-0.5 space-y-0.5">
+                        {selectedActivity.targetAgents.map((a) => (
+                          <div key={a.id} className="text-xs flex items-center gap-1.5">
+                            <span style={{ color: ROLE_COLORS[a.role] || "#6a6a7a" }}>{a.name}</span>
+                            <span className="text-text-muted">({a.role})</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedActivity.toolInput && (
+                    <div>
+                      <span className="text-[10px] text-text-muted uppercase">Input</span>
+                      <pre className="text-xs bg-bg rounded p-2 mt-0.5 overflow-x-auto max-h-40 overflow-y-auto">{JSON.stringify(selectedActivity.toolInput, null, 2)}</pre>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {selectedActivity.type === "tool_result" && (
+                <div className="space-y-2">
+                  <div>
+                    <span className="text-[10px] text-text-muted uppercase">Tool</span>
+                    <p className="text-xs mt-0.5">{TOOL_LABELS[selectedActivity.tool || ""] || selectedActivity.tool}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-text-muted uppercase">Result</span>
+                    <pre className="text-xs bg-bg rounded p-2 mt-0.5 overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap">{selectedActivity.toolResult}</pre>
+                  </div>
+                </div>
+              )}
+
+              {selectedActivity.type === "escalation" && (
+                <div>
+                  <span className="text-[10px] text-text-muted uppercase">Question</span>
+                  <p className="text-xs whitespace-pre-wrap bg-bg rounded p-2 mt-0.5">{selectedActivity.content}</p>
+                </div>
+              )}
+
+              {selectedActivity.type === "done" && (
+                <p className="text-xs text-success">Agent completed their work.</p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -487,6 +652,7 @@ function StepTypeBadge({ type, tool }: { type: string; tool?: string }) {
     start: { text: "started", color: "#3b82f6" },
     message: { text: "response", color: "#22c55e" },
     tool: { text: tool ? TOOL_LABELS[tool] || tool : "tool", color: "#f59e0b" },
+    tool_result: { text: tool ? `${TOOL_LABELS[tool] || tool} result` : "result", color: "#a78bfa" },
     escalation: { text: "escalated", color: "#ef4444" },
     done: { text: "done", color: "#22c55e" },
   };

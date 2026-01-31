@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ToastProvider } from "./components/Toast";
 
 export const metadata: Metadata = {
   title: "Agent Mafia",
@@ -14,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="bg-bg text-text min-h-screen antialiased">
-        <nav className="border-b border-border px-6 py-3 flex items-center justify-between">
+        <nav className="border-b border-border px-6 py-3 flex items-center justify-between" aria-label="Main navigation">
           <a href="/" className="text-lg font-semibold tracking-tight text-accent">
             Agent Mafia
           </a>
@@ -27,7 +28,9 @@ export default function RootLayout({
             </a>
           </div>
         </nav>
-        <main className="max-w-6xl mx-auto px-6 py-6">{children}</main>
+        <main className="max-w-6xl mx-auto px-6 py-6">
+          <ToastProvider>{children}</ToastProvider>
+        </main>
       </body>
     </html>
   );

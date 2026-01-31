@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { continueTask } from "@/lib/orchestrator";
+import { continueTask, cancelOrchestration } from "@/lib/orchestrator";
 import type { ImageInput } from "@/lib/anthropic-agent";
 
 export async function GET(
@@ -45,6 +45,21 @@ export async function POST(
     const msg = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
+}
+
+export async function PATCH(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  const cancelled = cancelOrchestration(id);
+  if (cancelled) {
+    await prisma.conversation.update({
+      where: { id },
+      data: { status: "stopped" },
+    });
+  }
+  return NextResponse.json({ ok: true, cancelled });
 }
 
 export async function DELETE(

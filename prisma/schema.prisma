@@ -23,9 +23,10 @@ model Agent {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  outgoingRels Relationship[] @relation("FromAgent")
-  incomingRels Relationship[] @relation("ToAgent")
-  messages     Message[]
+  outgoingRels   Relationship[]  @relation("FromAgent")
+  incomingRels   Relationship[]  @relation("ToAgent")
+  messages       Message[]
+  agentContexts  AgentContext[]
 }
 
 model Relationship {
@@ -49,6 +50,7 @@ model Conversation {
   updatedAt        DateTime  @updatedAt
   messages         Message[]
   escalations      Escalation[]
+  agentContexts    AgentContext[]
 }
 
 model Message {
@@ -72,4 +74,17 @@ model Escalation {
   answer         String?
   status         String       @default("pending") // "pending" | "answered"
   createdAt      DateTime     @default(now())
+}
+
+model AgentContext {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  summary        String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([conversationId, agentId])
 }

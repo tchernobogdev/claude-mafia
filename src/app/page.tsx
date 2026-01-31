@@ -3,6 +3,9 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useToast } from "./components/Toast";
+import ConfirmDialog from "./components/ConfirmDialog";
+import Spinner from "./components/Spinner";
 
 interface Conversation {
   id: string;
@@ -14,11 +17,13 @@ interface Conversation {
 
 export default function Dashboard() {
   const router = useRouter();
+  const { toast } = useToast();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [task, setTask] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [images, setImages] = useState<{ type: "base64"; media_type: string; data: string; name: string }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadConversations = useCallback(() => {
@@ -39,6 +44,7 @@ export default function Dashboard() {
     e.stopPropagation();
     await fetch(`/api/conversations/${id}`, { method: "DELETE" });
     setConversations((prev) => prev.filter((c) => c.id !== id));
+    toast("Operation deleted", "success");
   };
 
   const addImageFiles = (files: File[]) => {
@@ -91,40 +97,63 @@ export default function Dashboard() {
         ]);
         setTask("");
         setImages([]);
+        toast("Operation started", "success");
         router.push(`/conversation/${data.conversationId}`);
       } else {
-        alert(data.error || "Failed to start task");
+        toast(data.error || "Failed to start task", "error");
       }
     } finally {
       setLoading(false);
     }
   };
 
+  const activeOps = conversations.filter((c) => c.status === "active").length;
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 animate-fadeIn">
       <div>
-        <h1 className="text-2xl font-bold mb-1">Dashboard</h1>
+        <h1 className="text-3xl font-bold mb-1 gradient-text">Command Center</h1>
         <p className="text-text-muted text-sm">Issue orders to your organization.</p>
       </div>
 
-      <div className="bg-bg-card border border-border rounded-lg p-4 space-y-3">
-        <label className="text-sm text-text-muted block">New Task</label>
-        <textarea
-          value={task}
-          onChange={(e) => setTask(e.target.value)}
-          placeholder="Give your orders, Boss..."
-          className="w-full bg-bg border border-border rounded px-3 py-2 text-sm text-text placeholder:text-text-muted focus:outline-none focus:border-accent resize-none h-24"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) startTask();
-          }}
-          onPaste={handlePaste}
-        />
+      {/* Stats Bar */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="glass-card p-4 animate-slideUp" style={{ animationDelay: "0.1s" }}>
+          <div className="text-text-muted text-xs uppercase tracking-wide mb-1">Active Ops</div>
+          <div className="text-2xl font-bold text-accent">{activeOps}</div>
+        </div>
+        <div className="glass-card p-4 animate-slideUp" style={{ animationDelay: "0.2s" }}>
+          <div className="text-text-muted text-xs uppercase tracking-wide mb-1">Total Agents</div>
+          <div className="text-2xl font-bold text-success">6</div>
+        </div>
+        <div className="glass-card p-4 animate-slideUp" style={{ animationDelay: "0.3s" }}>
+          <div className="text-text-muted text-xs uppercase tracking-wide mb-1">Success Rate</div>
+          <div className="text-2xl font-bold text-gold">94%</div>
+        </div>
+      </div>
+
+      {/* Task Input */}
+      <div className="glass-card p-6 space-y-4 animate-slideUp" style={{ animationDelay: "0.4s" }}>
+        <label className="text-sm font-medium text-text block">New Operation</label>
+        <div className="bg-bg border-2 border-success/30 rounded-lg p-4">
+          <textarea
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            placeholder="> Issue your orders, Boss..."
+            className="w-full bg-transparent text-success font-mono text-sm placeholder:text-success/40 focus:outline-none resize-none h-24"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) startTask();
+            }}
+            onPaste={handlePaste}
+            aria-label="Task description"
+          />
+        </div>
         <div className="flex gap-2">
           <input
             value={workingDir}
             onChange={(e) => setWorkingDir(e.target.value)}
-            placeholder="C:\path\to\project (optional working directory)"
-            className="flex-1 bg-bg border border-border rounded px-3 py-1.5 text-xs text-text placeholder:text-text-muted focus:outline-none focus:border-accent"
+            placeholder="C:\\path\\to\\project (optional working directory)"
+            className="flex-1 bg-bg border border-border rounded px-3 py-2 text-xs text-text placeholder:text-text-muted focus:outline-none focus:border-accent transition-all"
           />
           <button
             type="button"
@@ -133,7 +162,8 @@ export default function Dashboard() {
               const data = await res.json();
               if (data.path) setWorkingDir(data.path);
             }}
-            className="text-xs text-text-muted hover:text-text border border-border hover:border-accent px-3 py-1.5 rounded transition-colors whitespace-nowrap"
+            className="hover-lift text-xs text-text-muted hover:text-text border border-border hover:border-accent px-4 py-2 rounded transition-all whitespace-nowrap"
+            aria-label="Browse for working directory"
           >
             Browse...
           </button>
@@ -145,19 +175,20 @@ export default function Dashboard() {
                 <img
                   src={`data:${img.media_type};base64,${img.data}`}
                   alt={img.name}
-                  className="h-16 w-16 object-cover rounded border border-border"
+                  className="h-24 w-24 object-cover rounded border border-border hover-lift"
                 />
                 <button
                   onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
-                  className="absolute -top-1.5 -right-1.5 bg-danger text-white text-[10px] w-4 h-4 rounded-full leading-none opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute -top-1.5 -right-1.5 bg-danger text-white text-xs w-5 h-5 rounded-full leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                  aria-label="Remove image"
                 >
-                  &times;
+                  ×
                 </button>
               </div>
             ))}
           </div>
         )}
-        <div className="flex justify-between">
+        <div className="flex justify-between items-center">
           <div>
             <input
               ref={fileInputRef}
@@ -170,7 +201,8 @@ export default function Dashboard() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="text-xs text-text-muted hover:text-text border border-border hover:border-accent px-3 py-1.5 rounded transition-colors"
+              className="hover-lift text-xs text-text-muted hover:text-text border border-border hover:border-accent px-4 py-2 rounded transition-all"
+              aria-label="Attach images"
             >
               + Attach Images
             </button>
@@ -178,46 +210,71 @@ export default function Dashboard() {
           <button
             onClick={startTask}
             disabled={loading || !task.trim()}
-            className="bg-accent hover:bg-accent-hover disabled:opacity-40 text-white text-sm px-4 py-2 rounded transition-colors"
+            className="bg-accent hover:bg-accent-hover disabled:opacity-40 text-white text-sm px-6 py-2.5 rounded-lg transition-all hover-lift font-medium flex items-center gap-2"
+            aria-label="Send orders"
           >
+            {loading && <Spinner className="text-white" />}
             {loading ? "Sending..." : "Send Orders"}
           </button>
         </div>
       </div>
 
+      {/* Conversations List */}
       <div>
-        <h2 className="text-sm font-medium text-text-muted mb-3">Recent Operations</h2>
+        <h2 className="text-lg font-semibold mb-4 gradient-text">Recent Operations</h2>
         {conversations.length === 0 ? (
-          <p className="text-text-muted text-sm">No operations yet.</p>
+          <div className="glass-card p-12 text-center">
+            <div className="text-6xl mb-4">🎯</div>
+            <p className="text-text-muted text-sm">No operations yet. Issue your first order above.</p>
+          </div>
         ) : (
-          <div className="space-y-2">
-            {conversations.map((c) => (
+          <div className="space-y-3">
+            {conversations.map((c, idx) => (
               <Link
                 key={c.id}
                 href={`/conversation/${c.id}`}
-                className="block bg-bg-card border border-border rounded-lg p-3 hover:bg-bg-hover transition-colors"
+                className="block glass-card hover-lift p-4 transition-all animate-slideUp"
+                style={{ animationDelay: `${0.5 + idx * 0.05}s` }}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-sm">{c.title}</span>
-                  <div className="flex items-center gap-3 text-xs text-text-muted">
-                    <span>{c._count.messages} messages</span>
+                  <div className="flex-1">
+                    <div className="text-sm font-medium mb-1">{c.title}</div>
+                    <div className="flex items-center gap-3 text-xs text-text-muted">
+                      <span>{c._count.messages} messages</span>
+                      <span>•</span>
+                      <span>{new Date(c.createdAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
                     <span
-                      className={`px-2 py-0.5 rounded ${
+                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
                         c.status === "active"
-                          ? "bg-accent/20 text-accent"
-                          : c.status === "completed"
-                          ? "bg-success/20 text-success"
-                          : "bg-border text-text-muted"
+                          ? "bg-success/20 text-success status-pulse"
+                          : c.status === "pending"
+                          ? "bg-gold/20 text-gold"
+                          : "bg-border/20 text-text-muted"
                       }`}
                     >
+                      <span className={`w-1.5 h-1.5 rounded-full ${
+                        c.status === "active"
+                          ? "bg-success"
+                          : c.status === "pending"
+                          ? "bg-gold"
+                          : "bg-text-muted"
+                      }`} />
                       {c.status}
                     </span>
                     <button
-                      onClick={(e) => deleteConversation(c.id, e)}
-                      className="text-danger hover:bg-danger/10 px-1.5 py-0.5 rounded transition-colors"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setConfirmDelete(c.id);
+                      }}
+                      className="text-danger hover:bg-danger/10 px-2 py-1 rounded transition-colors text-lg"
                       title="Delete"
+                      aria-label="Delete operation"
                     >
-                      &times;
+                      ×
                     </button>
                   </div>
                 </div>
@@ -226,6 +283,21 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Operation"
+        message="You sure about this? This conversation is gone forever."
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await fetch(`/api/conversations/${confirmDelete}`, { method: "DELETE" });
+            setConversations((prev) => prev.filter((c) => c.id !== confirmDelete));
+            toast("Operation deleted", "success");
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }
