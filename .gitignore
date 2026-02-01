@@ -5,3 +5,4 @@ prisma/dev.db-journal
 .env
 nul
 debug-latest.json
+*.tsbuildinfo
