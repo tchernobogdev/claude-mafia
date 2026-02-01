@@ -231,10 +231,10 @@ export async function buildAgentMcpServer(
         return { content: [{ type: "text" as const, text: "[Job complete — shutting down]" }] };
       }
       // Stash the resolver so respond_to_message can resolve the asker's promise
-      let pending = (instance as unknown as { _pendingResponses?: Map<string, (r: string) => void> })._pendingResponses;
+      let pending = instance._pendingResponses;
       if (!pending) {
         pending = new Map();
-        (instance as unknown as { _pendingResponses: Map<string, (r: string) => void> })._pendingResponses = pending;
+        instance._pendingResponses = pending;
       }
       pending.set(msg.id, msg.resolve);
       return { content: [{ type: "text" as const, text: `[Incoming question (messageId: ${msg.id})]:\n${msg.content}\n\nUse respond_to_message with this messageId to reply.` }] };
@@ -260,7 +260,7 @@ export async function buildAgentMcpServer(
       // We need to find and resolve it. The mailbox message object stores the resolver directly.
       // Since we already delivered the message in wait_for_messages, the resolver is on the message object.
       // We stash received messages on the instance for this purpose.
-      const pending = (instance as unknown as { _pendingResponses?: Map<string, (r: string) => void> })._pendingResponses;
+      const pending = instance._pendingResponses;
       if (pending?.has(messageId)) {
         pending.get(messageId)!(response);
         pending.delete(messageId);

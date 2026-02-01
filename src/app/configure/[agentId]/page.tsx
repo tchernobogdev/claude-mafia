@@ -49,6 +49,7 @@ export default function AgentConfigPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [allAgents, setAllAgents] = useState<AgentListItem[]>([]);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
     systemPrompt: "",
@@ -60,67 +61,109 @@ export default function AgentConfigPage() {
 
   const [relForm, setRelForm] = useState({ action: "delegate" as string, toAgentId: "" });
 
-  const loadAgent = useCallback(() => {
-    fetch(`/api/agents/${agentId}`)
-      .then((r) => r.json())
-      .then((data: Agent) => {
-        setAgent(data);
-        setForm({
-          name: data.name,
-          systemPrompt: data.systemPrompt,
-          model: data.model,
-          specialty: data.specialty || "",
-          role: data.role,
-          parentId: data.parentId || "",
-        });
+  const loadAgent = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/agents/${agentId}`);
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data: Agent = await res.json();
+      setAgent(data);
+      setForm({
+        name: data.name,
+        systemPrompt: data.systemPrompt,
+        model: data.model,
+        specialty: data.specialty || "",
+        role: data.role,
+        parentId: data.parentId || "",
       });
+    } catch (err) {
+      console.error("LoadAgent:", err);
+      setError("Failed to load agent. Please try again.");
+    }
   }, [agentId]);
 
   useEffect(() => {
     loadAgent();
-    fetch("/api/agents")
-      .then((r) => r.json())
-      .then(setAllAgents);
+    const loadAllAgents = async () => {
+      try {
+        const res = await fetch("/api/agents");
+        if (!res.ok) throw new Error(`Request failed (${res.status})`);
+        const data = await res.json();
+        setAllAgents(data);
+      } catch (err) {
+        console.error("LoadAllAgents:", err);
+        setError("Failed to load agents list.");
+      }
+    };
+    loadAllAgents();
   }, [loadAgent]);
 
   const save = async () => {
     setSaving(true);
-    await fetch(`/api/agents/${agentId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...form,
-        parentId: form.parentId || null,
-      }),
-    });
-    setSaving(false);
-    loadAgent();
+    try {
+      setError(null);
+      const res = await fetch(`/api/agents/${agentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          parentId: form.parentId || null,
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      loadAgent();
+    } catch (err) {
+      console.error("SaveAgent:", err);
+      setError("Failed to save agent. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const deleteAgent = async () => {
     if (!confirm(`Delete ${agent?.name}? This will also delete all subordinates.`)) return;
-    await fetch(`/api/agents/${agentId}`, { method: "DELETE" });
-    router.push("/configure");
+    try {
+      setError(null);
+      const res = await fetch(`/api/agents/${agentId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      router.push("/configure");
+    } catch (err) {
+      console.error("DeleteAgent:", err);
+      setError("Failed to delete agent. Please try again.");
+    }
   };
 
   const addRelationship = async () => {
     if (!relForm.toAgentId) return;
-    await fetch("/api/relationships", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        fromAgentId: agentId,
-        toAgentId: relForm.toAgentId,
-        action: relForm.action,
-      }),
-    });
-    setRelForm({ action: "delegate", toAgentId: "" });
-    loadAgent();
+    try {
+      setError(null);
+      const res = await fetch("/api/relationships", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromAgentId: agentId,
+          toAgentId: relForm.toAgentId,
+          action: relForm.action,
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setRelForm({ action: "delegate", toAgentId: "" });
+      loadAgent();
+    } catch (err) {
+      console.error("AddRelationship:", err);
+      setError("Failed to add relationship. Please try again.");
+    }
   };
 
   const removeRelationship = async (relId: string) => {
-    await fetch(`/api/relationships/${relId}`, { method: "DELETE" });
-    loadAgent();
+    try {
+      setError(null);
+      const res = await fetch(`/api/relationships/${relId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      loadAgent();
+    } catch (err) {
+      console.error("RemoveRelationship:", err);
+      setError("Failed to remove relationship. Please try again.");
+    }
   };
 
   if (!agent) return <div className="text-text-muted text-sm">Loading...</div>;
@@ -129,6 +172,13 @@ export default function AgentConfigPage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
+      {error && (
+        <div style={{ background: "#fee", color: "#c00", padding: "12px 16px", borderRadius: "8px", margin: "12px 0", fontSize: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} style={{ background: "none", border: "none", color: "#c00", cursor: "pointer", fontSize: "18px" }}>×</button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <button onClick={() => router.push("/configure")} className="text-xs text-text-muted hover:text-text mb-2 block">

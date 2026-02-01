@@ -89,6 +89,7 @@ export default function ConversationPage() {
   const [answer, setAnswer] = useState("");
   const [status, setStatus] = useState("active");
   const [workingDirectory, setWorkingDirectory] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Follow-up chat state
   const [followUp, setFollowUp] = useState("");
@@ -111,52 +112,59 @@ export default function ConversationPage() {
 
   const activityLoadedRef = useRef(false);
 
-  const loadConversation = useCallback(() => {
-    fetch(`/api/conversations/${conversationId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        const allMessages: Message[] = data.messages || [];
-        // Separate activity messages from display messages
-        const displayMessages = allMessages.filter((m: Message) => m.role !== "activity");
-        setMessages(displayMessages);
-        setEscalations(data.escalations || []);
-        setStatus(data.status);
-        if (data.workingDirectory) setWorkingDirectory(data.workingDirectory);
+  const loadConversation = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}`);
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = await res.json();
+      const allMessages: Message[] = data.messages || [];
+      // Separate activity messages from display messages
+      const displayMessages = allMessages.filter((m: Message) => m.role !== "activity");
+      setMessages(displayMessages);
+      setEscalations(data.escalations || []);
+      setStatus(data.status);
+      if (data.workingDirectory) setWorkingDirectory(data.workingDirectory);
 
-        // Reconstruct activity feed from persisted activity messages (only on first load)
-        if (!activityLoadedRef.current) {
-          activityLoadedRef.current = true;
-          const activityMessages = allMessages.filter((m: Message) => m.role === "activity");
-          if (activityMessages.length > 0) {
-            const restored = activityMessages.map((m: Message): ActivityItem | null => {
-              const meta = parseMetadata(m.metadata) || {};
-              const eventType = meta.eventType as string;
-              let type: ActivityItem["type"] = "message";
-              if (eventType === "agent_start") type = "start";
-              else if (eventType === "agent_message") type = "message";
-              else if (eventType === "tool_call") type = "tool";
-              else if (eventType === "tool_result") type = "tool_result";
-              else if (eventType === "escalation") type = "escalation";
-              else if (eventType === "agent_done") type = "done";
-              else return null;
-              return {
-                id: m.id,
-                type,
-                agentId: meta.agentId as string | undefined,
-                agentName: meta.agentName as string | undefined,
-                agentRole: meta.role as string | undefined,
-                content: (meta.content || meta.task || meta.question) as string | undefined,
-                tool: meta.tool as string | undefined,
-                toolInput: meta.input as Record<string, unknown> | undefined,
-                toolResult: meta.result as string | undefined,
-                targetAgents: meta.targetAgents as TargetAgent[] | undefined,
-                timestamp: new Date(m.createdAt).getTime(),
-              };
-            }).filter((a): a is ActivityItem => a !== null);
-            setActivity(restored);
-          }
+      // Reconstruct activity feed from persisted activity messages (only on first load)
+      if (!activityLoadedRef.current) {
+        activityLoadedRef.current = true;
+        const activityMessages = allMessages.filter((m: Message) => m.role === "activity");
+        if (activityMessages.length > 0) {
+          const restored = activityMessages.map((m: Message): ActivityItem | null => {
+            const meta = parseMetadata(m.metadata) || {};
+            const eventType = meta.eventType as string;
+            let type: ActivityItem["type"] = "message";
+            if (eventType === "agent_start") type = "start";
+            else if (eventType === "agent_message") type = "message";
+            else if (eventType === "tool_call") type = "tool";
+            else if (eventType === "tool_result") type = "tool_result";
+            else if (eventType === "escalation") type = "escalation";
+            else if (eventType === "agent_done") type = "done";
+            else return null;
+            return {
+              id: m.id,
+              type,
+              agentId: meta.agentId as string | undefined,
+              agentName: meta.agentName as string | undefined,
+              agentRole: meta.role as string | undefined,
+              content: (meta.content || meta.task || meta.question) as string | undefined,
+              tool: meta.tool as string | undefined,
+              toolInput: meta.input as Record<string, unknown> | undefined,
+              toolResult: meta.result as string | undefined,
+              targetAgents: meta.targetAgents as TargetAgent[] | undefined,
+              timestamp: new Date(m.createdAt).getTime(),
+            };
+          }).filter((a): a is ActivityItem => a !== null);
+          setActivity(restored);
         }
-      });
+      }
+    } catch (err) {
+      console.error("LoadConversation:", err);
+      // Only set error on initial load failure, not on polling failures
+      if (!activityLoadedRef.current) {
+        setError("Failed to load conversation. Please try again.");
+      }
+    }
   }, [conversationId]);
 
   useEffect(() => {
@@ -257,12 +265,19 @@ export default function ConversationPage() {
 
   const submitAnswer = async (escalationId: string) => {
     if (!answer.trim()) return;
-    await fetch(`/api/escalations/${escalationId}/answer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answer }),
-    });
-    setAnswer("");
+    try {
+      setError(null);
+      const res = await fetch(`/api/escalations/${escalationId}/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setAnswer("");
+    } catch (err) {
+      console.error("SubmitAnswer:", err);
+      setError("Failed to submit answer. Please try again.");
+    }
   };
 
   const addFollowUpImages = (files: File[]) => {
@@ -282,20 +297,25 @@ export default function ConversationPage() {
   const sendFollowUp = async () => {
     if (!followUp.trim() || sending) return;
     setSending(true);
+    setError(null);
     try {
       const payload: Record<string, unknown> = { message: followUp };
       if (followUpImages.length > 0) {
         payload.images = followUpImages.map(({ type, media_type, data }) => ({ type, media_type, data }));
       }
-      await fetch(`/api/conversations/${conversationId}`, {
+      const res = await fetch(`/api/conversations/${conversationId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       setFollowUp("");
       setFollowUpImages([]);
       setStatus("active");
       loadConversation();
+    } catch (err) {
+      console.error("SendFollowUp:", err);
+      setError("Failed to send follow-up. Please try again.");
     } finally {
       setSending(false);
     }
@@ -309,6 +329,13 @@ export default function ConversationPage() {
 
   return (
     <div className="space-y-4">
+      {error && (
+        <div style={{ background: "#fee", color: "#c00", padding: "12px 16px", borderRadius: "8px", margin: "12px 0", fontSize: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} style={{ background: "none", border: "none", color: "#c00", cursor: "pointer", fontSize: "18px" }}>×</button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <a href="/" className="text-xs text-text-muted hover:text-text mb-1 block">&larr; Dashboard</a>
@@ -324,8 +351,15 @@ export default function ConversationPage() {
           {status === "active" && (
             <button
               onClick={async () => {
-                await fetch(`/api/conversations/${conversationId}`, { method: "PATCH" });
-                setStatus("stopped");
+                try {
+                  setError(null);
+                  const res = await fetch(`/api/conversations/${conversationId}`, { method: "PATCH" });
+                  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+                  setStatus("stopped");
+                } catch (err) {
+                  console.error("StopJob:", err);
+                  setError("Failed to stop job. Please try again.");
+                }
               }}
               className="text-danger text-xs hover:bg-danger/10 px-3 py-1.5 rounded border border-danger/30 transition-colors font-medium"
             >
@@ -335,8 +369,15 @@ export default function ConversationPage() {
           <button
             onClick={async () => {
               if (!confirm("Delete this operation?")) return;
-              await fetch(`/api/conversations/${conversationId}`, { method: "DELETE" });
-              router.push("/");
+              try {
+                setError(null);
+                const res = await fetch(`/api/conversations/${conversationId}`, { method: "DELETE" });
+                if (!res.ok) throw new Error(`Request failed (${res.status})`);
+                router.push("/");
+              } catch (err) {
+                console.error("DeleteOperation:", err);
+                setError("Failed to delete operation. Please try again.");
+              }
             }}
             className="text-text-muted text-xs hover:bg-danger/10 hover:text-danger px-3 py-1.5 rounded border border-border hover:border-danger/30 transition-colors"
           >

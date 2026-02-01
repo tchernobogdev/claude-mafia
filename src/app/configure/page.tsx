@@ -113,6 +113,7 @@ export default function ConfigurePage() {
   const [relContextMenu, setRelContextMenu] = useState<RelContextMenu | null>(null);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
     role: "soldier" as string,
@@ -120,17 +121,30 @@ export default function ConfigurePage() {
     parentId: "",
     systemPrompt: "",
   });
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   // All nodes including boss
   const allNodes = [BOSS_NODE, ...agents];
 
-  const loadData = useCallback(() => {
-    fetch("/api/agents")
-      .then((r) => r.json())
-      .then(setAgents);
-    fetch("/api/relationships")
-      .then((r) => r.json())
-      .then(setRelationships);
+  const loadData = useCallback(async () => {
+    try {
+      const agentsRes = await fetch("/api/agents");
+      if (!agentsRes.ok) throw new Error(`Request failed (${agentsRes.status})`);
+      const agentsData = await agentsRes.json();
+      setAgents(agentsData);
+
+      const relsRes = await fetch("/api/relationships");
+      if (!relsRes.ok) throw new Error(`Request failed (${relsRes.status})`);
+      const relsData = await relsRes.json();
+      setRelationships(relsData);
+    } catch (err) {
+      console.error("LoadData:", err);
+      setError("Failed to load data. Please try again.");
+    }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
@@ -150,6 +164,9 @@ export default function ConfigurePage() {
         setContextMenu(null);
         setRelContextMenu(null);
         setEditForm(null);
+        setShowImportModal(false);
+        setImportText("");
+        setImportError(null);
       }
     };
     window.addEventListener("keydown", handler);
@@ -158,60 +175,191 @@ export default function ConfigurePage() {
 
   const createAgent = async () => {
     if (!form.name.trim()) return;
-    const cx = -pan.x + 400 + Math.random() * 200;
-    const cy = -pan.y + 200 + Math.random() * 200;
-    await fetch("/api/agents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...form,
-        parentId: form.parentId || null,
-        posX: cx,
-        posY: cy,
-      }),
-    });
-    setForm({ name: "", role: "soldier", model: "claude-sonnet-4-5-20250929", parentId: "", systemPrompt: "" });
-    setShowForm(false);
-    loadData();
+    try {
+      setError(null);
+      const cx = -pan.x + 400 + Math.random() * 200;
+      const cy = -pan.y + 200 + Math.random() * 200;
+      const res = await fetch("/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          parentId: form.parentId || null,
+          posX: cx,
+          posY: cy,
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setForm({ name: "", role: "soldier", model: "claude-sonnet-4-5-20250929", parentId: "", systemPrompt: "" });
+      setShowForm(false);
+      loadData();
+    } catch (err) {
+      console.error("CreateAgent:", err);
+      setError("Failed to create agent. Please try again.");
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      const exportData = { agents, relationships };
+      const jsonString = JSON.stringify(exportData);
+      const base64 = btoa(unescape(encodeURIComponent(jsonString)));
+      await navigator.clipboard.writeText(base64);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (err) {
+      console.error("Export failed:", err);
+      setError("Failed to export configuration.");
+    }
+  };
+
+  const handleImport = async () => {
+    try {
+      setImportError(null);
+      setImporting(true);
+      const jsonString = decodeURIComponent(escape(atob(importText.trim())));
+      const parsed = JSON.parse(jsonString);
+
+      if (!Array.isArray(parsed.agents) || !Array.isArray(parsed.relationships)) {
+        throw new Error("Invalid configuration format");
+      }
+
+      const idMapping: Record<string, string> = {};
+
+      // Create agents
+      for (const agent of parsed.agents) {
+        const randomX = Math.random() * 600 + 100;
+        const randomY = Math.random() * 400 + 100;
+
+        const res = await fetch("/api/agents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: agent.name,
+            role: agent.role,
+            specialty: agent.specialty,
+            systemPrompt: agent.systemPrompt,
+            model: agent.model,
+            parentId: null,
+            posX: randomX,
+            posY: randomY,
+          }),
+        });
+
+        if (!res.ok) throw new Error(`Failed to create agent ${agent.name}`);
+        const newAgent = await res.json();
+        idMapping[agent.id] = newAgent.id;
+      }
+
+      // Remap parentIds
+      for (const agent of parsed.agents) {
+        if (agent.parentId && idMapping[agent.parentId]) {
+          const newId = idMapping[agent.id];
+          await fetch(`/api/agents/${newId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ parentId: idMapping[agent.parentId] }),
+          });
+        }
+      }
+
+      // Create relationships
+      for (const rel of parsed.relationships) {
+        const fromId = idMapping[rel.fromAgentId];
+        const toId = idMapping[rel.toAgentId];
+
+        if (!fromId || !toId) continue;
+
+        const res = await fetch("/api/relationships", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fromAgentId: fromId,
+            toAgentId: toId,
+            action: rel.action,
+            cardinality: rel.cardinality,
+          }),
+        });
+
+        if (!res.ok) throw new Error(`Failed to create relationship`);
+      }
+
+      await loadData();
+      setShowImportModal(false);
+      setImportText("");
+      setImportError(null);
+    } catch (err) {
+      console.error("Import failed:", err);
+      setImportError(err instanceof Error ? err.message : "Invalid import data. Please check the format.");
+    } finally {
+      setImporting(false);
+    }
   };
 
   const updateAgentPos = async (id: string, posX: number, posY: number) => {
     if (id === BOSS_ID) return; // Boss position is local-only
-    await fetch(`/api/agents/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ posX, posY }),
-    });
+    try {
+      const res = await fetch(`/api/agents/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ posX, posY }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    } catch (err) {
+      console.error("UpdateAgentPos:", err);
+      setError("Failed to update agent position.");
+    }
   };
 
   const createRelationship = async (fromId: string, toId: string) => {
     if (fromId === toId) return;
     // Boss connections are visual-only for now (boss is not a DB agent)
     if (fromId === BOSS_ID || toId === BOSS_ID) return;
-    await fetch("/api/relationships", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        fromAgentId: fromId,
-        toAgentId: toId,
-        action: connectAction,
-      }),
-    });
-    loadData();
+    try {
+      setError(null);
+      const res = await fetch("/api/relationships", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromAgentId: fromId,
+          toAgentId: toId,
+          action: connectAction,
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      loadData();
+    } catch (err) {
+      console.error("CreateRelationship:", err);
+      setError("Failed to create relationship. Please try again.");
+    }
   };
 
   const deleteRelationship = async (relId: string) => {
-    await fetch(`/api/relationships/${relId}`, { method: "DELETE" });
-    loadData();
+    try {
+      setError(null);
+      const res = await fetch(`/api/relationships/${relId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      loadData();
+    } catch (err) {
+      console.error("DeleteRelationship:", err);
+      setError("Failed to delete relationship. Please try again.");
+    }
   };
 
   const deleteAgent = async (agentId: string) => {
     if (agentId === BOSS_ID) return;
     const agent = agents.find((a) => a.id === agentId);
     if (!confirm(`Delete ${agent?.name}? This will also delete all subordinates.`)) return;
-    await fetch(`/api/agents/${agentId}`, { method: "DELETE" });
-    setContextMenu(null);
-    loadData();
+    try {
+      setError(null);
+      const res = await fetch(`/api/agents/${agentId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setContextMenu(null);
+      loadData();
+    } catch (err) {
+      console.error("DeleteAgent:", err);
+      setError("Failed to delete agent. Please try again.");
+    }
   };
 
   const openEditForm = (agentId: string) => {
@@ -231,20 +379,28 @@ export default function ConfigurePage() {
   const saveEditForm = async () => {
     if (!editForm) return;
     setSaving(true);
-    await fetch(`/api/agents/${editForm.agentId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: editForm.name,
-        role: editForm.role,
-        model: editForm.model,
-        systemPrompt: editForm.systemPrompt,
-        parentId: editForm.parentId || null,
-      }),
-    });
-    setSaving(false);
-    setEditForm(null);
-    loadData();
+    try {
+      setError(null);
+      const res = await fetch(`/api/agents/${editForm.agentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: editForm.name,
+          role: editForm.role,
+          model: editForm.model,
+          systemPrompt: editForm.systemPrompt,
+          parentId: editForm.parentId || null,
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setEditForm(null);
+      loadData();
+    } catch (err) {
+      console.error("SaveEditForm:", err);
+      setError("Failed to save agent. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   // Node mouse handlers
@@ -409,6 +565,13 @@ export default function ConfigurePage() {
 
   return (
     <div className="space-y-4">
+      {error && (
+        <div style={{ background: "#fee", color: "#c00", padding: "12px 16px", borderRadius: "8px", margin: "12px 0", fontSize: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} style={{ background: "none", border: "none", color: "#c00", cursor: "pointer", fontSize: "18px" }}>×</button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Organization</h1>
@@ -430,6 +593,18 @@ export default function ConfigurePage() {
               </button>
             ))}
           </div>
+          <button
+            onClick={handleExport}
+            className="bg-bg-card border border-border text-text text-sm px-4 py-2 rounded transition-colors hover:bg-bg-hover"
+          >
+            {copySuccess ? "✓ Copied!" : "Export"}
+          </button>
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="bg-bg-card border border-border text-text text-sm px-4 py-2 rounded transition-colors hover:bg-bg-hover"
+          >
+            Import
+          </button>
           <button
             onClick={() => setShowForm(!showForm)}
             className="bg-accent hover:bg-accent-hover text-white text-sm px-4 py-2 rounded transition-colors"
@@ -539,6 +714,9 @@ export default function ConfigurePage() {
             <marker id="arrow-collaborate-rev" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
               <polygon points="8 0, 0 3, 8 6" fill={ACTION_COLORS.collaborate} />
             </marker>
+            <marker id="arrow-reports" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#ef4444" />
+            </marker>
           </defs>
           <g transform={`translate(${pan.x}, ${pan.y})`}>
             {/* Relationship connectors */}
@@ -595,6 +773,32 @@ export default function ConfigurePage() {
                     className="font-mono"
                   >
                     {rel.action}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Underboss → Boss "Reports to" connectors */}
+            {agents.filter((a) => a.role === "underboss").map((underboss) => {
+              const info = getConnectorPath(underboss, BOSS_NODE);
+              return (
+                <g key={`reports-${underboss.id}`}>
+                  <path
+                    d={info.path}
+                    fill="none"
+                    stroke="#ef4444"
+                    strokeWidth="2"
+                    markerEnd="url(#arrow-reports)"
+                  />
+                  <text
+                    x={info.labelX}
+                    y={info.labelY}
+                    fill="#ef4444"
+                    fontSize="10"
+                    textAnchor="middle"
+                    className="font-mono"
+                  >
+                    Reports to
                   </text>
                 </g>
               );
@@ -848,6 +1052,43 @@ export default function ConfigurePage() {
           ))}
         </div>
       </div>
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-bg-card border border-border rounded-lg p-6 w-full max-w-lg">
+            <h2 className="text-lg font-bold mb-4">Import Configuration</h2>
+            {importError && (
+              <div className="text-red-500 text-sm mb-3">{importError}</div>
+            )}
+            <textarea
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              className="w-full h-40 bg-bg border border-border rounded p-3 text-sm font-mono focus:outline-none focus:border-accent resize-none"
+              placeholder="Paste base64 encoded configuration..."
+            />
+            <div className="flex justify-end gap-3 mt-4">
+              <button
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportText("");
+                  setImportError(null);
+                }}
+                className="text-text-muted text-sm px-3 py-1.5 hover:text-text transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleImport}
+                disabled={importing || !importText.trim()}
+                className="bg-accent hover:bg-accent-hover text-white text-sm px-4 py-1.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {importing ? "Importing..." : "Import"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

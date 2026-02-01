@@ -26,6 +26,9 @@ export default function RootLayout({
             <a href="/configure" className="text-text-muted hover:text-text transition-colors">
               Configure
             </a>
+            <a href="/settings" className="text-text-muted hover:text-text transition-colors">
+              Settings
+            </a>
           </div>
         </nav>
         <main className="max-w-6xl mx-auto px-6 py-6">

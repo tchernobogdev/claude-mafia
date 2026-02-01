@@ -13,6 +13,11 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const host = req.headers.get("host") || "";
+  if (!host.startsWith("localhost") && !host.startsWith("127.0.0.1")) {
+    return NextResponse.json({ error: "Forbidden: local access only" }, { status: 403 });
+  }
+
   const body = await req.json();
   const task = body.task as string;
   const images = body.images as ImageInput[] | undefined;

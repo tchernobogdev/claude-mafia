@@ -59,6 +59,7 @@ export interface AgentInstance {
   abortController: AbortController;
   /** The background query() promise — resolves when the agent session ends. */
   queryPromise: Promise<string>;
+  _pendingResponses?: Map<string, (r: string) => void>;
 }
 
 class AgentPool {

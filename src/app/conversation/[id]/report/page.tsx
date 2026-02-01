@@ -23,12 +23,22 @@ export default function ReportPage() {
   const params = useParams();
   const conversationId = params.id as string;
   const [data, setData] = useState<ConversationData | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    fetch(`/api/conversations/${conversationId}`)
-      .then((r) => r.json())
-      .then(setData);
-  }, [conversationId]);
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}`);
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const resData = await res.json();
+      setData(resData);
+    } catch (err) {
+      console.error("LoadReport:", err);
+      // Only set error on initial load failure, not on polling failures
+      if (!data) {
+        setError("Failed to load report. Please try again.");
+      }
+    }
+  }, [conversationId, data]);
 
   useEffect(() => {
     load();
@@ -49,6 +59,13 @@ export default function ReportPage() {
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4">
+      {error && (
+        <div style={{ background: "#fee", color: "#c00", padding: "12px 16px", borderRadius: "8px", margin: "12px 0", fontSize: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} style={{ background: "none", border: "none", color: "#c00", cursor: "pointer", fontSize: "18px" }}>×</button>
+        </div>
+      )}
+
       <div className="mb-6">
         <a
           href={`/conversation/${conversationId}`}

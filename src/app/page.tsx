@@ -26,17 +26,30 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const loadConversations = useCallback(() => {
-    fetch("/api/conversations")
-      .then((r) => r.json())
-      .then(setConversations);
+  const loadConversations = useCallback(async () => {
+    try {
+      const res = await fetch("/api/conversations");
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = await res.json();
+      setConversations(data);
+    } catch (err) {
+      console.error("LoadConversations:", err);
+      setError("Failed to load conversations. Please try again.");
+    }
   }, []);
 
-  const loadAgents = useCallback(() => {
-    fetch("/api/agents")
-      .then((r) => r.json())
-      .then((data) => { if (Array.isArray(data)) setAgents(data); });
+  const loadAgents = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agents");
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = await res.json();
+      if (Array.isArray(data)) setAgents(data);
+    } catch (err) {
+      console.error("LoadAgents:", err);
+      setError("Failed to load agents. Please try again.");
+    }
   }, []);
 
   useEffect(() => {
@@ -50,9 +63,15 @@ export default function Dashboard() {
   const deleteConversation = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    await fetch(`/api/conversations/${id}`, { method: "DELETE" });
-    setConversations((prev) => prev.filter((c) => c.id !== id));
-    toast("Operation deleted", "success");
+    try {
+      const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      toast("Operation deleted", "success");
+    } catch (err) {
+      console.error("DeleteConversation:", err);
+      setError("Failed to delete conversation. Please try again.");
+    }
   };
 
   const addImageFiles = (files: File[]) => {
@@ -85,6 +104,7 @@ export default function Dashboard() {
   const startTask = async () => {
     if (!task.trim()) return;
     setLoading(true);
+    setError(null);
     try {
       const payload: Record<string, unknown> = { task };
       if (workingDir.trim()) payload.workingDirectory = workingDir.trim();
@@ -96,6 +116,7 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
       if (data.conversationId) {
         // Add to list immediately so it's visible if user navigates back
@@ -110,6 +131,9 @@ export default function Dashboard() {
       } else {
         toast(data.error || "Failed to start task", "error");
       }
+    } catch (err) {
+      console.error("StartTask:", err);
+      setError("Failed to start operation. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -126,6 +150,13 @@ export default function Dashboard() {
         <h1 className="text-3xl font-bold mb-1 gradient-text">Command Center</h1>
         <p className="text-text-muted text-sm">Issue orders to your organization.</p>
       </div>
+
+      {error && (
+        <div style={{ background: "#fee", color: "#c00", padding: "12px 16px", borderRadius: "8px", margin: "12px 0", fontSize: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} style={{ background: "none", border: "none", color: "#c00", cursor: "pointer", fontSize: "18px" }}>×</button>
+        </div>
+      )}
 
       {/* Stats Bar */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -169,9 +200,15 @@ export default function Dashboard() {
           <button
             type="button"
             onClick={async () => {
-              const res = await fetch("/api/browse-folder", { method: "POST" });
-              const data = await res.json();
-              if (data.path) setWorkingDir(data.path);
+              try {
+                const res = await fetch("/api/browse-folder", { method: "POST" });
+                if (!res.ok) throw new Error(`Request failed (${res.status})`);
+                const data = await res.json();
+                if (data.path) setWorkingDir(data.path);
+              } catch (err) {
+                console.error("BrowseFolder:", err);
+                setError("Failed to browse folder. Please try again.");
+              }
             }}
             className="hover-lift text-xs text-text-muted hover:text-text border border-border hover:border-accent px-4 py-2 rounded transition-all whitespace-nowrap"
             aria-label="Browse for working directory"
@@ -301,10 +338,16 @@ export default function Dashboard() {
         message="You sure about this? This conversation is gone forever."
         onConfirm={async () => {
           if (confirmDelete) {
-            await fetch(`/api/conversations/${confirmDelete}`, { method: "DELETE" });
-            setConversations((prev) => prev.filter((c) => c.id !== confirmDelete));
-            toast("Operation deleted", "success");
-            setConfirmDelete(null);
+            try {
+              const res = await fetch(`/api/conversations/${confirmDelete}`, { method: "DELETE" });
+              if (!res.ok) throw new Error(`Request failed (${res.status})`);
+              setConversations((prev) => prev.filter((c) => c.id !== confirmDelete));
+              toast("Operation deleted", "success");
+              setConfirmDelete(null);
+            } catch (err) {
+              console.error("DeleteConversationConfirm:", err);
+              setError("Failed to delete conversation. Please try again.");
+            }
           }
         }}
         onCancel={() => setConfirmDelete(null)}
