@@ -52,7 +52,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const cancelled = cancelOrchestration(id);
+  const cancelled = await cancelOrchestration(id);
   if (cancelled) {
     await prisma.conversation.update({
       where: { id },

@@ -4,8 +4,349 @@ import { buildAgentMcpServer } from "./mcp-tools";
 import { sseManager } from "./sse";
 import { agentPool, AgentMailbox, type AgentInstance } from "./agent-pool";
 import { buildDynamicOrg } from "./dynamic-org-builder";
+import {
+  routeRequest,
+  getProvider,
+  detectProviderFromModel,
+  filterToolsForProvider,
+  type ProviderId,
+  type ProviderTool,
+} from "./providers";
+import { routeVisualTask, detectVisualTask } from "./visual-router";
+import { buildResumeContext, getProgressTracker } from "./progress-tracker";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
+import * as crypto from "crypto";
+
+// ==================== CONTENT SIZE LIMITS ====================
+
+const MAX_MESSAGE_CONTENT_SIZE = 100000; // 100KB max per message
+const MAX_METADATA_SIZE = 50000; // 50KB max for metadata
+
+/**
+ * Truncate content to maximum size with indicator
+ */
+function truncateContent(content: string, maxSize: number = MAX_MESSAGE_CONTENT_SIZE): string {
+  if (content.length <= maxSize) return content;
+
+  const truncateMarker = "\n\n... [CONTENT TRUNCATED - exceeded size limit] ...";
+  const markerLength = truncateMarker.length;
+  const safeSize = maxSize - markerLength;
+
+  // Try to truncate at a sentence boundary
+  let truncated = content.slice(0, safeSize);
+  const lastPeriod = truncated.lastIndexOf(". ");
+  const lastNewline = truncated.lastIndexOf("\n");
+  const cutPoint = Math.max(lastPeriod, lastNewline);
+
+  if (cutPoint > safeSize * 0.8) {
+    truncated = truncated.slice(0, cutPoint + 1);
+  }
+
+  // CRITICAL: Verify we don't exceed maxSize after adding marker
+  if (truncated.length + markerLength > maxSize) {
+    truncated = truncated.slice(0, maxSize - markerLength);
+  }
+
+  console.warn(`[AgentMafia] Content truncated from ${content.length} to ${truncated.length + markerLength} chars`);
+  return truncated + truncateMarker;
+}
+
+/**
+ * Truncate metadata JSON to maximum size
+ */
+function truncateMetadata(metadata: string | null, maxSize: number = MAX_METADATA_SIZE): string | null {
+  if (!metadata) return null;
+  if (metadata.length <= maxSize) return metadata;
+
+  try {
+    const parsed = JSON.parse(metadata);
+    // Remove large fields first
+    if (parsed.images && Array.isArray(parsed.images)) {
+      parsed.images = parsed.images.slice(0, 3); // Keep max 3 image refs
+    }
+    if (parsed.fullResult) {
+      parsed.fullResult = parsed.fullResult.slice(0, 1000) + "...[truncated]";
+    }
+    const result = JSON.stringify(parsed);
+    if (result.length <= maxSize) return result;
+
+    // Still too big, just truncate
+    console.warn(`[AgentMafia] Metadata truncated from ${metadata.length} to ${maxSize} chars`);
+    return metadata.slice(0, maxSize);
+  } catch {
+    return metadata.slice(0, maxSize);
+  }
+}
+
+/**
+ * Create a message with size limits enforced
+ */
+async function createSafeMessage(data: {
+  conversationId: string;
+  agentId?: string | null;
+  role: string;
+  content: string;
+  metadata?: string | null;
+}) {
+  return prisma.message.create({
+    data: {
+      conversationId: data.conversationId,
+      agentId: data.agentId,
+      role: data.role,
+      content: truncateContent(data.content),
+      metadata: truncateMetadata(data.metadata ?? null),
+    },
+  });
+}
+
+// ==================== END CONTENT SIZE LIMITS ====================
+
+// ==================== IMAGE HANDLING FOR MULTI-MODAL SUPPORT ====================
+
+// Track temp directories per conversation for cleanup
+const conversationTempDirs = new Map<string, string>();
+
+/**
+ * Save images to temp directory and return file paths.
+ * Images are saved with unique names to avoid collisions.
+ */
+async function saveImagesToTemp(conversationId: string, images: ImageInput[]): Promise<string[]> {
+  if (!images || images.length === 0) return [];
+
+  // Create or get temp directory for this conversation
+  let tempDir = conversationTempDirs.get(conversationId);
+  if (!tempDir) {
+    tempDir = path.join(os.tmpdir(), `agentmafia-${conversationId}`);
+    try {
+      await fs.promises.mkdir(tempDir, { recursive: true });
+      conversationTempDirs.set(conversationId, tempDir);
+    } catch (err) {
+      console.error(`[AgentMafia] Failed to create temp directory for images:`, err);
+      return [];
+    }
+  }
+
+  const savedPaths: string[] = [];
+
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    try {
+      // Validate image data
+      if (!img.data || !img.media_type) {
+        console.warn(`[AgentMafia] Invalid image at index ${i}: missing data or media_type`);
+        continue;
+      }
+
+      // Determine file extension from media type
+      const extMap: Record<string, string> = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+      };
+      const ext = extMap[img.media_type] || ".png";
+
+      // Generate unique filename
+      const hash = crypto.createHash("md5").update(img.data.slice(0, 100)).digest("hex").slice(0, 8);
+      const filename = `image-${i + 1}-${hash}${ext}`;
+      const filePath = path.join(tempDir, filename);
+
+      // Decode and save
+      const buffer = Buffer.from(img.data, "base64");
+
+      // Basic validation: check minimum size (corrupt images are often very small)
+      if (buffer.length < 100) {
+        console.warn(`[AgentMafia] Image ${i + 1} appears corrupt (too small: ${buffer.length} bytes)`);
+        continue;
+      }
+
+      await fs.promises.writeFile(filePath, buffer);
+      savedPaths.push(filePath);
+      console.log(`[AgentMafia] Saved image ${i + 1} to ${filePath} (${buffer.length} bytes)`);
+    } catch (err) {
+      console.error(`[AgentMafia] Failed to save image ${i + 1}:`, err);
+    }
+  }
+
+  return savedPaths;
+}
+
+/**
+ * Build image context string to prepend to prompts.
+ * This tells the agent where to find the images and how to view them.
+ */
+function buildImageContext(imagePaths: string[]): string {
+  if (imagePaths.length === 0) return "";
+
+  const imageList = imagePaths.map((p, i) => `  ${i + 1}. ${p}`).join("\n");
+
+  return `
+ATTACHED IMAGES: The user has attached ${imagePaths.length} image(s) to this task. To view them, use the Read tool on each file path:
+${imageList}
+
+IMPORTANT: You MUST read and analyze these images as part of completing the task. The images contain relevant visual information that may be essential for understanding the request.
+`;
+}
+
+/**
+ * Clean up temp directory for a conversation.
+ * Called when conversation ends or is aborted.
+ */
+async function cleanupConversationImages(conversationId: string): Promise<void> {
+  const tempDir = conversationTempDirs.get(conversationId);
+  if (!tempDir) return;
+
+  try {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+    conversationTempDirs.delete(conversationId);
+    console.log(`[AgentMafia] Cleaned up temp images for conversation ${conversationId}`);
+  } catch (err) {
+    console.error(`[AgentMafia] Failed to cleanup temp images:`, err);
+  }
+}
+
+// ==================== END IMAGE HANDLING ====================
+
+// ==================== NON-ANTHROPIC PROVIDER EXECUTION ====================
+
+/**
+ * Execute an agent using a non-Anthropic provider (Kimi, OpenAI, etc.)
+ * This handles tool conversion and execution loop for providers without MCP support
+ */
+async function executeWithProvider(
+  providerId: ProviderId,
+  model: string,
+  systemPrompt: string,
+  task: string,
+  tools: ProviderTool[],
+  maxTurns: number,
+  onToolUse: (toolName: string, toolInput: Record<string, unknown>) => void,
+  onDelta: (delta: string) => void,
+  signal?: AbortSignal
+): Promise<string> {
+  const provider = getProvider(providerId);
+
+  if (!provider.isConfigured()) {
+    throw new Error(`Provider ${providerId} is not configured. Please set the appropriate API key.`);
+  }
+
+  // Filter tools for this provider's capabilities
+  // Type cast through unknown since ProviderTool has a stricter shape
+  const filteredTools = filterToolsForProvider(
+    providerId,
+    tools as unknown as Array<{ name: string; [key: string]: unknown }>
+  ) as unknown as ProviderTool[];
+
+  // Build message history for the conversation
+  const messages: Array<{ role: "user" | "assistant" | "system"; content: string }> = [
+    { role: "user", content: task },
+  ];
+
+  let turnCount = 0;
+  let lastTextResponse = "";
+
+  while (turnCount < maxTurns) {
+    if (signal?.aborted) {
+      return "[Job stopped by the boss]";
+    }
+
+    turnCount++;
+
+    try {
+      const response = await routeRequest(providerId, {
+        model,
+        messages,
+        tools: filteredTools,
+        system: systemPrompt,
+        max_tokens: 8192,
+      });
+
+      // Collect text response
+      if (response.content) {
+        lastTextResponse = response.content;
+        onDelta(response.content);
+      }
+
+      // Check if we need to handle tool calls
+      if (response.toolCalls.length === 0 || response.stopReason !== "tool_use") {
+        // No more tool calls - we're done
+        break;
+      }
+
+      // Execute tool calls
+      const toolResults: Array<{ tool_use_id: string; content: string; is_error?: boolean }> = [];
+
+      for (const toolCall of response.toolCalls) {
+        onToolUse(toolCall.name, toolCall.input);
+
+        // For non-Anthropic providers, we need to execute tools ourselves
+        // This is a simplified version - full tool execution would need more work
+        const toolResult = await executeSimpleTool(toolCall.name, toolCall.input);
+        toolResults.push({
+          tool_use_id: toolCall.id,
+          content: toolResult.content,
+          is_error: toolResult.isError,
+        });
+      }
+
+      // Add assistant message with tool calls to history
+      messages.push({
+        role: "assistant",
+        content: response.content || `[Executing tools: ${response.toolCalls.map((t) => t.name).join(", ")}]`,
+      });
+
+      // Add tool results to history
+      for (const result of toolResults) {
+        messages.push({
+          role: "user",
+          content: `Tool result for ${result.tool_use_id}: ${result.content}`,
+        });
+      }
+    } catch (err) {
+      console.error(`[AgentMafia] Provider ${providerId} error:`, err);
+      return `[Provider error]: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  return lastTextResponse || "[No response from agent]";
+}
+
+/**
+ * Execute a simple tool (for non-Anthropic providers)
+ * This is a basic implementation - complex tools like delegate_task need full MCP support
+ */
+async function executeSimpleTool(
+  toolName: string,
+  input: Record<string, unknown>
+): Promise<{ content: string; isError: boolean }> {
+  // For non-Anthropic providers, we support a limited set of tools
+  // Complex orchestration tools (delegate_task, ask_agent, etc.) are not supported
+  try {
+    switch (toolName) {
+      case "submit_result":
+        return { content: String(input.result || ""), isError: false };
+
+      case "respond_to_message":
+        return { content: String(input.response || ""), isError: false };
+
+      default:
+        // Unsupported tool
+        return {
+          content: `Tool '${toolName}' is not supported for non-Anthropic providers. This provider can only perform text generation tasks without complex orchestration.`,
+          isError: true,
+        };
+    }
+  } catch (err) {
+    return {
+      content: `Tool error: ${err instanceof Error ? err.message : String(err)}`,
+      isError: true,
+    };
+  }
+}
+
+// ==================== END NON-ANTHROPIC PROVIDER EXECUTION ====================
 
 const DEBUG_LOG_PATH = path.join(process.cwd(), "debug-latest.json");
 
@@ -31,7 +372,8 @@ interface ExecuteOptions {
   conversationId: string;
   depth?: number;
   agentInvocations?: Map<string, number>;
-  images?: ImageInput[];
+  // Note: images are now handled at the orchestration level via temp files
+  // and embedded in the task prompt. This parameter is kept for backward compatibility.
   workingDirectory?: string;
   signal?: AbortSignal;
 }
@@ -54,7 +396,7 @@ async function emitActivity(
         conversationId,
         role: "activity",
         content: "",
-        metadata: JSON.stringify({ eventType, ...data }),
+        metadata: truncateMetadata(JSON.stringify({ eventType, ...data })),
       },
     });
   }
@@ -76,12 +418,110 @@ GOOD: "I read src/app/page.tsx — it's the main dashboard component, exports a 
 // Track active orchestrations so they can be cancelled
 const activeOrchestrations = new Map<string, AbortController>();
 
-export function cancelOrchestration(conversationId: string): boolean {
+// ==================== ORCHESTRATION LOCKING ====================
+// Prevent multiple orchestrations from running on the same conversation
+
+interface OrchestrationLock {
+  acquiredAt: number;
+  holder: string; // e.g., "startTask", "continueTask", "executeConversation"
+}
+
+const orchestrationLocks = new Map<string, OrchestrationLock>();
+const LOCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes max lock duration
+
+/**
+ * Try to acquire orchestration lock for a conversation
+ * Returns true if lock acquired, false if already locked
+ *
+ * Note: This function is atomic - we check and set in one operation to avoid
+ * TOCTOU race conditions where two requests could both see an expired lock.
+ */
+function tryAcquireOrchestrationLock(conversationId: string, holder: string): boolean {
+  const existing = orchestrationLocks.get(conversationId);
+  const now = Date.now();
+
+  if (existing) {
+    const age = now - existing.acquiredAt;
+    if (age <= LOCK_TIMEOUT_MS) {
+      // Lock is still valid - deny
+      console.warn(`[AgentMafia] Orchestration lock denied for ${conversationId} - already held by ${existing.holder} for ${Math.round(age / 1000)}s`);
+      return false;
+    }
+    // Lock expired - we'll replace it below
+    console.warn(`[AgentMafia] Replacing stale orchestration lock for ${conversationId} (was held by ${existing.holder} for ${Math.round(age / 1000)}s)`);
+  }
+
+  // Atomic: directly set the new lock (replaces expired lock if any)
+  orchestrationLocks.set(conversationId, {
+    acquiredAt: now,
+    holder,
+  });
+  console.log(`[AgentMafia] Orchestration lock acquired for ${conversationId} by ${holder}`);
+  return true;
+}
+
+/**
+ * Release orchestration lock for a conversation
+ */
+function releaseOrchestrationLock(conversationId: string): void {
+  const lock = orchestrationLocks.get(conversationId);
+  if (lock) {
+    const duration = Date.now() - lock.acquiredAt;
+    console.log(`[AgentMafia] Orchestration lock released for ${conversationId} (held for ${Math.round(duration / 1000)}s)`);
+    orchestrationLocks.delete(conversationId);
+  }
+}
+
+/**
+ * Check if a conversation has an active orchestration
+ */
+export function isOrchestrationRunning(conversationId: string): boolean {
+  const lock = orchestrationLocks.get(conversationId);
+  if (!lock) return false;
+
+  // Check if lock has expired
+  const age = Date.now() - lock.acquiredAt;
+  if (age > LOCK_TIMEOUT_MS) {
+    orchestrationLocks.delete(conversationId);
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Get orchestration status for a conversation
+ */
+export function getOrchestrationStatus(conversationId: string): {
+  isRunning: boolean;
+  holder?: string;
+  durationMs?: number;
+} {
+  const lock = orchestrationLocks.get(conversationId);
+  if (!lock) return { isRunning: false };
+
+  const age = Date.now() - lock.acquiredAt;
+  if (age > LOCK_TIMEOUT_MS) {
+    orchestrationLocks.delete(conversationId);
+    return { isRunning: false };
+  }
+
+  return {
+    isRunning: true,
+    holder: lock.holder,
+    durationMs: age,
+  };
+}
+
+// ==================== END ORCHESTRATION LOCKING ====================
+
+export async function cancelOrchestration(conversationId: string): Promise<boolean> {
   const controller = activeOrchestrations.get(conversationId);
   if (controller) {
-    agentPool.shutdownConversation(conversationId);
+    await agentPool.shutdownConversation(conversationId);
     controller.abort();
     activeOrchestrations.delete(conversationId);
+    releaseOrchestrationLock(conversationId);
     return true;
   }
   return false;
@@ -140,7 +580,6 @@ export async function executeAgent({
   conversationId,
   depth = 0,
   agentInvocations = new Map(),
-  images,
   workingDirectory,
   signal,
 }: ExecuteOptions): Promise<string> {
@@ -218,6 +657,7 @@ IMPORTANT - WAITING BEHAVIOR:
       resolve(value);
     };
   });
+  const now = Date.now();
   const instance: AgentInstance = {
     agentId,
     mailbox: new AgentMailbox(),
@@ -225,6 +665,8 @@ IMPORTANT - WAITING BEHAVIOR:
     resultResolver,
     abortController: agentAbortController,
     queryPromise: Promise.resolve(""), // will be set below
+    registeredAt: now,
+    lastActivityAt: now,
   };
   agentPool.register(conversationId, instance);
 
@@ -245,13 +687,68 @@ IMPORTANT - WAITING BEHAVIOR:
   const maxTurnsSetting = await prisma.setting.findUnique({ where: { key: "maxAgentTurns" } });
   const maxTurns = maxTurnsSetting ? parseInt(maxTurnsSetting.value, 10) : 200;
 
+  // Determine provider from agent config or model name
+  const providerId = ((agent as { providerId?: string }).providerId as ProviderId) || detectProviderFromModel(agent.model);
+  const modelToUse = agent.model;
+
+  // Log provider info
+  console.log(`[AgentMafia] Agent ${agent.name} using provider: ${providerId}, model: ${modelToUse}`);
+
   // Start query in background — agent stays alive until maxTurns or shutdown
   const queryPromise = (async () => {
     try {
+      // Use different execution paths based on provider
+      if (providerId !== "anthropic") {
+        // Non-Anthropic provider (Kimi, OpenAI, etc.) - use provider abstraction
+        console.log(`[AgentMafia] Using non-Anthropic provider execution for ${agent.name}`);
+
+        // Build simplified tools for non-Anthropic providers
+        const simplifiedTools: ProviderTool[] = [
+          {
+            name: "submit_result",
+            description: "Submit your final result/report",
+            parameters: {
+              type: "object",
+              properties: {
+                result: { type: "string", description: "Your final result or report" },
+              },
+              required: ["result"],
+            },
+          },
+        ];
+
+        const result = await executeWithProvider(
+          providerId,
+          modelToUse,
+          systemPrompt,
+          `<user-task>\n${task}\n</user-task>`,
+          simplifiedTools,
+          maxTurns,
+          (toolName, toolInput) => {
+            emitActivity(conversationId, "tool_call", {
+              agentId: agent.id,
+              agentName: agent.name,
+              tool: toolName,
+              input: toolInput,
+            });
+          },
+          (delta) => {
+            sseManager.emit(conversationId, "agent_stream", {
+              agentId: agent.id,
+              agentName: agent.name,
+              delta,
+            });
+          },
+          agentAbortController.signal
+        );
+        return result;
+      }
+
+      // Anthropic provider - use full Claude Code SDK with MCP support
       const agentResult = await runAgent({
         prompt: `<user-task>\n${task}\n</user-task>`,
         systemPrompt,
-        model: agent.model,
+        model: modelToUse,
         role: agent.role,
         workingDirectory,
         maxTurns,
@@ -346,14 +843,12 @@ IMPORTANT - WAITING BEHAVIOR:
   });
 
   // Save message
-  await prisma.message.create({
-    data: {
-      conversationId,
-      agentId: agent.id,
-      role: "assistant",
-      content: result,
-      metadata: JSON.stringify({ depth }),
-    },
+  await createSafeMessage({
+    conversationId,
+    agentId: agent.id,
+    role: "assistant",
+    content: result,
+    metadata: JSON.stringify({ depth }),
   });
 
   // Save agent context for follow-up continuity
@@ -502,7 +997,7 @@ export async function executeConversation(conversationId: string, task: string, 
   sseManager.emit(conversationId, "task_start", { task });
 
   // Run orchestration in background
-  runOrchestration(underboss.id, task, conversationId, images, conversation.workingDirectory || undefined).catch((err) => {
+  runOrchestration(underboss.id, task, conversationId, images, conversation.workingDirectory || undefined, "executeConversation").catch((err) => {
     console.error("Orchestration failed:", err);
     sseManager.emit(conversationId, "task_error", {
       error: err instanceof Error ? err.message : String(err),
@@ -555,7 +1050,7 @@ export async function startTask(task: string, images?: ImageInput[], workingDire
   sseManager.emit(conversation.id, "task_start", { task });
 
   // Run orchestration in background — don't block the HTTP response
-  runOrchestration(underbossId, task, conversation.id, images, workingDirectory).catch((err) => {
+  runOrchestration(underbossId, task, conversation.id, images, workingDirectory, "startTask").catch((err) => {
     console.error("Orchestration failed:", err);
     sseManager.emit(conversation.id, "task_error", {
       error: err instanceof Error ? err.message : String(err),
@@ -573,13 +1068,74 @@ async function runOrchestration(
   task: string,
   conversationId: string,
   images?: ImageInput[],
-  workingDirectory?: string
+  workingDirectory?: string,
+  lockHolder: string = "runOrchestration"
 ): Promise<void> {
+  // Acquire orchestration lock
+  if (!tryAcquireOrchestrationLock(conversationId, lockHolder)) {
+    throw new Error(`Orchestration already running for conversation ${conversationId}. Wait for it to complete or cancel it first.`);
+  }
+
   const controller = new AbortController();
   activeOrchestrations.set(conversationId, controller);
 
+  // Global orchestration timeout - prevents runaway jobs
+  const ORCHESTRATION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours max
+  const orchestrationTimeout = setTimeout(() => {
+    console.warn(`[AgentMafia] Orchestration timeout reached for ${conversationId} after ${ORCHESTRATION_TIMEOUT_MS / 1000}s`);
+    controller.abort();
+  }, ORCHESTRATION_TIMEOUT_MS);
+
   try {
-    const result = await executeAgent({ agentId, task, conversationId, images, workingDirectory, signal: controller.signal });
+    // Save images to temp files first
+    let imagePaths: string[] = [];
+    if (images && images.length > 0) {
+      imagePaths = await saveImagesToTemp(conversationId, images);
+      console.log(`[AgentMafia] Saved ${imagePaths.length} image(s) for conversation ${conversationId}`);
+    }
+
+    // Check if this is a visual task that should be routed through Kimi
+    let enhancedTask = task;
+    let usedKimi = false;
+
+    if (images && images.length > 0) {
+      try {
+        const visualRouteResult = await routeVisualTask(task, images, imagePaths);
+
+        if (visualRouteResult.shouldUseKimi) {
+          // Kimi successfully analyzed the images
+          enhancedTask = visualRouteResult.enhancedTask;
+          usedKimi = true;
+
+          // Emit event for UI to show Kimi analysis
+          sseManager.emit(conversationId, "kimi_analysis", {
+            detection: visualRouteResult.detection,
+            analysis: visualRouteResult.kimiAnalysis,
+          });
+
+          console.log(`[AgentMafia] Visual task routed through Kimi (${visualRouteResult.detection.confidence} confidence)`);
+        } else {
+          // Fall back to standard image context
+          const imageContext = buildImageContext(imagePaths);
+          enhancedTask = imageContext + "\n" + task;
+          console.log(`[AgentMafia] Visual routing skipped: ${visualRouteResult.detection.reason}`);
+        }
+      } catch (routeErr) {
+        // If visual routing fails, fall back to standard approach
+        console.warn(`[AgentMafia] Visual routing error, falling back:`, routeErr);
+        const imageContext = buildImageContext(imagePaths);
+        enhancedTask = imageContext + "\n" + task;
+      }
+    }
+
+    // Execute the agent with the (potentially enhanced) task
+    const result = await executeAgent({
+      agentId,
+      task: enhancedTask,
+      conversationId,
+      workingDirectory,
+      signal: controller.signal,
+    });
 
     if (controller.signal.aborted) {
       await prisma.conversation.update({
@@ -592,11 +1148,30 @@ async function runOrchestration(
         where: { id: conversationId },
         data: { status: "completed" },
       });
-      sseManager.emit(conversationId, "task_complete", { result });
+      sseManager.emit(conversationId, "task_complete", {
+        result,
+        usedKimiAnalysis: usedKimi,
+      });
     }
   } finally {
-    agentPool.shutdownConversation(conversationId);
+    // Clear the global timeout
+    clearTimeout(orchestrationTimeout);
+
+    // Ensure all cleanup happens even if individual operations fail
+    try {
+      await agentPool.shutdownConversation(conversationId);
+    } catch (e) {
+      console.error(`[AgentMafia] Error shutting down agent pool for ${conversationId}:`, e);
+    }
+
     activeOrchestrations.delete(conversationId);
+    releaseOrchestrationLock(conversationId);
+
+    try {
+      await cleanupConversationImages(conversationId);
+    } catch (e) {
+      console.error(`[AgentMafia] Error cleaning up images for ${conversationId}:`, e);
+    }
   }
 }
 
@@ -643,7 +1218,12 @@ export async function continueTask(
     data: { status: "active" },
   });
 
-  // Build conversation history context for the follow-up
+  // ==================== ENHANCED CONTEXT FOR MULTI-DAY PROJECTS ====================
+
+  // Try to get progress tracking context (for long-running projects)
+  const progressContext = await buildResumeContext(conversationId);
+
+  // Build conversation history - EXPANDED from 20 to 50 messages for better continuity
   const previousMessages = await prisma.message.findMany({
     where: {
       conversationId,
@@ -653,24 +1233,64 @@ export async function continueTask(
     include: { agent: true },
   });
 
-  const historyLines = previousMessages
-    .slice(-20) // last 20 messages max
-    .map((m) => {
+  // For very long conversations, use smart summarization
+  let historyContext = "";
+  const MAX_RECENT_MESSAGES = 50;
+  const MAX_HISTORY_LENGTH = 12000; // characters
+
+  if (previousMessages.length > MAX_RECENT_MESSAGES) {
+    // Summarize older messages, keep recent in full
+    const olderMessages = previousMessages.slice(0, -MAX_RECENT_MESSAGES);
+    const recentMessages = previousMessages.slice(-MAX_RECENT_MESSAGES);
+
+    // Create summary of older messages
+    const olderSummary = olderMessages.map((m) => {
       const speaker = m.role === "user" ? "USER" : (m.agent?.name || "AGENT");
-      return `${speaker}: ${m.content.slice(0, 500)}`;
-    });
+      // Very brief summary for old messages
+      return `[${speaker}]: ${m.content.slice(0, 100)}...`;
+    }).join("\n");
 
-  const historyPrefix = historyLines.length > 0
-    ? `CONVERSATION HISTORY:\n${historyLines.join("\n\n")}\n\n---\nFOLLOW-UP REQUEST: `
-    : "";
+    // Full content for recent messages
+    const recentHistory = recentMessages.map((m) => {
+      const speaker = m.role === "user" ? "USER" : (m.agent?.name || "AGENT");
+      return `${speaker}: ${m.content.slice(0, 800)}`;
+    }).join("\n\n");
 
-  const taskWithHistory = `${historyPrefix}${followUp}`;
+    historyContext = `EARLIER CONVERSATION (summarized, ${olderMessages.length} messages):\n${olderSummary.slice(0, 3000)}\n\n---\n\nRECENT CONVERSATION (last ${recentMessages.length} messages):\n${recentHistory}`;
+  } else {
+    // Short conversation - include all messages
+    historyContext = previousMessages.map((m) => {
+      const speaker = m.role === "user" ? "USER" : (m.agent?.name || "AGENT");
+      return `${speaker}: ${m.content.slice(0, 800)}`;
+    }).join("\n\n");
+  }
+
+  // Trim if still too long
+  if (historyContext.length > MAX_HISTORY_LENGTH) {
+    historyContext = historyContext.slice(-MAX_HISTORY_LENGTH);
+    historyContext = "...[earlier history truncated]...\n" + historyContext;
+  }
+
+  // Build the full context
+  let taskWithHistory = "";
+
+  if (progressContext) {
+    // Multi-day project with progress tracking
+    taskWithHistory = `${progressContext}\n\nCONVERSATION HISTORY:\n${historyContext}\n\n---\nFOLLOW-UP REQUEST: ${followUp}`;
+  } else if (historyContext.length > 0) {
+    // Standard conversation history
+    taskWithHistory = `CONVERSATION HISTORY:\n${historyContext}\n\n---\nFOLLOW-UP REQUEST: ${followUp}`;
+  } else {
+    taskWithHistory = followUp;
+  }
+
+  // ==================== END ENHANCED CONTEXT ====================
 
   sseManager.emit(conversationId, "task_start", { task: followUp });
 
   const workingDirectory = conversation.workingDirectory || undefined;
 
-  runOrchestration(underboss.id, taskWithHistory, conversationId, images, workingDirectory).catch((err) => {
+  runOrchestration(underboss.id, taskWithHistory, conversationId, images, workingDirectory, "continueTask").catch((err) => {
     console.error("Orchestration failed:", err);
     sseManager.emit(conversationId, "task_error", {
       error: err instanceof Error ? err.message : String(err),

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "./db";
 import { escalationManager } from "./escalation";
 import { agentPool } from "./agent-pool";
+import { getProgressTracker } from "./progress-tracker";
 
 interface McpToolContext {
   conversationId: string;
@@ -133,16 +134,15 @@ ${targetDesc}`,
     });
   }
 
-  // === ask_agent — implicit for ANY connected agent (outgoing + incoming, all types) ===
+  // === ask_agent — now allows ANY agent in the organization (not just direct relationships) ===
+  // Fetch all agents to allow lateral communication between any agents
+  const allAgents = await prisma.agent.findMany({
+    select: { id: true, name: true, role: true, specialty: true, systemPrompt: true },
+  });
   const askTargets = new Map<string, { id: string; name: string; role: string; specialty: string | null; systemPrompt: string }>();
-  for (const rel of agent.outgoingRels) {
-    if (!askTargets.has(rel.toAgent.id) && rel.toAgent.id !== agentId) {
-      askTargets.set(rel.toAgent.id, rel.toAgent);
-    }
-  }
-  for (const rel of agent.incomingRels) {
-    if (!askTargets.has(rel.fromAgent.id) && rel.fromAgent.id !== agentId) {
-      askTargets.set(rel.fromAgent.id, rel.fromAgent);
+  for (const a of allAgents) {
+    if (a.id !== agentId) {
+      askTargets.set(a.id, a);
     }
   }
 
@@ -151,7 +151,7 @@ ${targetDesc}`,
     const askTargetDesc = [...askTargets.values()].map(describeAgent).join("\n");
     tools.push({
       name: "ask_agent",
-      description: `Ask a question to any connected agent. If the agent is already running in the pool, the question is routed to their mailbox (no new spawn). Otherwise, a new instance is spawned.\n\nAvailable targets:\n${askTargetDesc}`,
+      description: `Ask a question to ANY agent in the organization. If the agent is already running in the pool, the question is routed to their mailbox (no new spawn). Otherwise, a new instance is spawned.\n\nAvailable targets:\n${askTargetDesc}`,
       inputSchema: {
         target: z.string().describe("Agent ID to ask"),
         question: z.string().describe("The question to ask"),
@@ -223,24 +223,36 @@ ${targetDesc}`,
     },
   });
 
-  // wait_for_messages: block until a question arrives or shutdown
+  // wait_for_messages: block until a question arrives, timeout, or shutdown
+  const WAIT_TIMEOUT_MS = 30000; // 30 seconds timeout (reduced from 90s for better responsiveness)
   tools.push({
     name: "wait_for_messages",
-    description: `Wait for incoming messages from subordinates or other agents. Blocks until a message arrives or the job ends.
+    description: `Wait for incoming messages from subordinates or other agents. Blocks until a message arrives, timeout (30s), or the job ends.
 
 CRITICAL: You MUST call this tool when:
 1. You delegated work and are waiting for subordinates to report back
 2. A subordinate said they're starting multi-phase work (e.g., "I'll do recon then implementation")
 3. After submit_result to enter standby mode for follow-up questions
 
-WARNING: If you just say "I'll wait for them to report back" WITHOUT calling this tool, your turn will END and the job will complete prematurely. You must ALWAYS call wait_for_messages to actually wait - don't just describe waiting in text.`,
+WARNING: If you just say "I'll wait for them to report back" WITHOUT calling this tool, your turn will END and the job will complete prematurely. You must ALWAYS call wait_for_messages to actually wait - don't just describe waiting in text.
+
+NOTE: This tool has a 30-second timeout. If no message arrives, you'll receive a timeout notification. You can then decide to wait again or proceed with what you have.`,
     inputSchema: {},
     handler: async () => {
       const instance = agentPool.get(context.conversationId, agentId);
       if (!instance) {
         return { content: [{ type: "text" as const, text: "[No pool instance — session ending]" }] };
       }
-      const msg = await instance.mailbox.receive();
+      const msg = await instance.mailbox.receiveWithTimeout(WAIT_TIMEOUT_MS);
+      if (msg === null) {
+        // Timeout - no message received
+        await context.emitActivity(context.conversationId, "wait_timeout", {
+          agentId: agent.id,
+          agentName: agent.name,
+          timeoutMs: WAIT_TIMEOUT_MS,
+        });
+        return { content: [{ type: "text" as const, text: `[TIMEOUT: No messages received after ${WAIT_TIMEOUT_MS / 1000} seconds. You can call wait_for_messages again to keep waiting, or proceed with what you have. If you're expecting results from a delegated task that hasn't completed, consider that the subordinate may be stuck or the task may be taking longer than expected.]` }] };
+      }
       if (msg.id === "__shutdown__") {
         return { content: [{ type: "text" as const, text: "[Job complete — shutting down]" }] };
       }
@@ -411,6 +423,199 @@ CRITICAL: After calling this tool, you MUST immediately call wait_for_messages a
         });
 
         return { content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }] };
+      },
+    });
+  }
+
+  // === Progress Tracking Tools (available to underbosses and capos) ===
+  if (agent.role === "underboss" || agent.role === "capo") {
+    const tracker = getProgressTracker(context.conversationId);
+
+    tools.push({
+      name: "update_progress",
+      description: `Update project progress tracking. Use this to keep track of what's been done on long-running or multi-day projects. Actions available:
+- "startPhase": Mark a phase as started (phaseName, optionally assignedTo)
+- "completePhase": Mark a phase as completed (phaseName, result)
+- "blockPhase": Mark a phase as blocked (phaseName, blockedBy)
+- "addDecision": Record a key decision (topic, question, decision, rationale, madeBy)
+- "recordFileChange": Record a file modification (filePath, changeType: created|modified|deleted, description)
+
+This helps maintain continuity across multiple sessions and prevents losing track of progress.`,
+      inputSchema: {
+        action: z.enum(["startPhase", "completePhase", "blockPhase", "addDecision", "recordFileChange"]).describe("The type of progress update"),
+        phaseName: z.string().optional().describe("Phase name (for phase actions)"),
+        assignedTo: z.string().optional().describe("Agent assigned to this phase"),
+        result: z.string().optional().describe("Result summary (for completePhase)"),
+        blockedBy: z.string().optional().describe("What's blocking the phase"),
+        topic: z.string().optional().describe("Decision topic"),
+        question: z.string().optional().describe("Decision question"),
+        decision: z.string().optional().describe("The decision made"),
+        rationale: z.string().optional().describe("Why this decision was made"),
+        madeBy: z.string().optional().describe("Who made the decision"),
+        filePath: z.string().optional().describe("File path (for recordFileChange)"),
+        changeType: z.enum(["created", "modified", "deleted"]).optional().describe("Type of file change"),
+        description: z.string().optional().describe("Description of the change"),
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const action = args.action as string;
+
+        // Check if progress tracking is initialized
+        if (!(await tracker.isInitialized())) {
+          return { content: [{ type: "text" as const, text: "[Progress tracking not initialized for this conversation. The boss needs to set up project tracking via the API first.]" }] };
+        }
+
+        try {
+          switch (action) {
+            case "startPhase": {
+              const phaseName = args.phaseName as string;
+              if (!phaseName) return { content: [{ type: "text" as const, text: "[Error: phaseName required for startPhase]" }] };
+              await tracker.startPhase(phaseName, args.assignedTo as string | undefined);
+              await context.emitActivity(context.conversationId, "progress_update", {
+                agentId: agent.id,
+                agentName: agent.name,
+                action: "startPhase",
+                phaseName,
+              });
+              return { content: [{ type: "text" as const, text: `Phase "${phaseName}" marked as started.` }] };
+            }
+
+            case "completePhase": {
+              const phaseName = args.phaseName as string;
+              const result = args.result as string;
+              if (!phaseName || !result) return { content: [{ type: "text" as const, text: "[Error: phaseName and result required for completePhase]" }] };
+              await tracker.completePhase(phaseName, result);
+              await context.emitActivity(context.conversationId, "progress_update", {
+                agentId: agent.id,
+                agentName: agent.name,
+                action: "completePhase",
+                phaseName,
+                result: result.slice(0, 200),
+              });
+              return { content: [{ type: "text" as const, text: `Phase "${phaseName}" marked as completed.` }] };
+            }
+
+            case "blockPhase": {
+              const phaseName = args.phaseName as string;
+              const blockedBy = args.blockedBy as string;
+              if (!phaseName || !blockedBy) return { content: [{ type: "text" as const, text: "[Error: phaseName and blockedBy required for blockPhase]" }] };
+              await tracker.blockPhase(phaseName, blockedBy);
+              await context.emitActivity(context.conversationId, "progress_update", {
+                agentId: agent.id,
+                agentName: agent.name,
+                action: "blockPhase",
+                phaseName,
+                blockedBy,
+              });
+              return { content: [{ type: "text" as const, text: `Phase "${phaseName}" marked as blocked by: ${blockedBy}` }] };
+            }
+
+            case "addDecision": {
+              const { topic, question, decision, rationale, madeBy } = args as Record<string, string | undefined>;
+              if (!topic || !question || !decision || !madeBy) {
+                return { content: [{ type: "text" as const, text: "[Error: topic, question, decision, and madeBy required for addDecision]" }] };
+              }
+              await tracker.recordDecision({ topic, question, decision, rationale, madeBy });
+              await context.emitActivity(context.conversationId, "progress_update", {
+                agentId: agent.id,
+                agentName: agent.name,
+                action: "addDecision",
+                topic,
+                decision,
+              });
+              return { content: [{ type: "text" as const, text: `Decision recorded: "${topic}" → ${decision}` }] };
+            }
+
+            case "recordFileChange": {
+              const { filePath, changeType, description: desc } = args as Record<string, string | undefined>;
+              if (!filePath || !changeType || !desc) {
+                return { content: [{ type: "text" as const, text: "[Error: filePath, changeType, and description required for recordFileChange]" }] };
+              }
+              await tracker.recordFileChange({
+                filePath,
+                changeType: changeType as "created" | "modified" | "deleted",
+                description: desc,
+                agentName: agent.name,
+              });
+              await context.emitActivity(context.conversationId, "progress_update", {
+                agentId: agent.id,
+                agentName: agent.name,
+                action: "recordFileChange",
+                filePath,
+                changeType,
+              });
+              return { content: [{ type: "text" as const, text: `File change recorded: [${changeType}] ${filePath}` }] };
+            }
+
+            default:
+              return { content: [{ type: "text" as const, text: `[Unknown action: ${action}]` }] };
+          }
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `[Error updating progress: ${err instanceof Error ? err.message : String(err)}]` }] };
+        }
+      },
+    });
+
+    tools.push({
+      name: "create_checkpoint",
+      description: `Create a checkpoint (save point) for the current project state. Use this:
+- At the end of a work session
+- Before starting risky changes
+- When pausing work for the day
+- Before major refactors
+
+The checkpoint saves: current phase states, pending tasks, and a comprehensive context summary. This allows work to be resumed accurately even after days or weeks.`,
+      inputSchema: {
+        name: z.string().describe("Checkpoint name (e.g., 'End of Day 1', 'Before Auth Refactor')"),
+        description: z.string().describe("What state the project is in"),
+        pendingTasks: z.array(z.string()).describe("List of tasks still pending"),
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const { name, description: desc, pendingTasks } = args as {
+          name: string;
+          description: string;
+          pendingTasks: string[];
+        };
+
+        if (!(await tracker.isInitialized())) {
+          return { content: [{ type: "text" as const, text: "[Progress tracking not initialized. Cannot create checkpoint.]" }] };
+        }
+
+        try {
+          const checkpointId = await tracker.createCheckpoint({
+            name,
+            description: desc,
+            pendingTasks,
+          });
+
+          await context.emitActivity(context.conversationId, "checkpoint_created", {
+            agentId: agent.id,
+            agentName: agent.name,
+            checkpointId,
+            checkpointName: name,
+          });
+
+          return { content: [{ type: "text" as const, text: `Checkpoint "${name}" created successfully. The project state has been saved and can be resumed later.` }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `[Error creating checkpoint: ${err instanceof Error ? err.message : String(err)}]` }] };
+        }
+      },
+    });
+
+    tools.push({
+      name: "get_progress_summary",
+      description: "Get the current progress summary for this project. Shows completed phases, pending work, key decisions made, and recent file changes. Use this to understand where the project stands.",
+      inputSchema: {},
+      handler: async () => {
+        if (!(await tracker.isInitialized())) {
+          return { content: [{ type: "text" as const, text: "[No progress tracking initialized for this conversation.]" }] };
+        }
+
+        try {
+          const contextSummary = await tracker.buildContextSummary();
+          return { content: [{ type: "text" as const, text: contextSummary }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `[Error getting progress: ${err instanceof Error ? err.message : String(err)}]` }] };
+        }
       },
     });
   }

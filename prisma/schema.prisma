@@ -1,6 +1,7 @@
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  // WAL mode enabled for better concurrent write performance
+  url      = "file:./dev.db?mode=wal&_journal_mode=WAL&_busy_timeout=5000"
 }
 
 generator client {
@@ -14,6 +15,7 @@ model Agent {
   specialty    String?
   systemPrompt String   @default("")
   model        String   @default("claude-sonnet-4-5-20250929")
+  providerId   String   @default("anthropic") // "anthropic" | "kimi" | "openai"
   parentId     String?
   parent       Agent?   @relation("Hierarchy", fields: [parentId], references: [id])
   children     Agent[]  @relation("Hierarchy")
@@ -29,6 +31,9 @@ model Agent {
   incomingRels   Relationship[]  @relation("ToAgent")
   messages       Message[]
   agentContexts  AgentContext[]
+
+  @@index([role, isDynamic])
+  @@index([conversationId])
 }
 
 model Relationship {
@@ -54,6 +59,10 @@ model Conversation {
   escalations      Escalation[]
   agentContexts    AgentContext[]
   testRuns         TestRun[]
+  progress         ProjectProgress?
+
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Message {
@@ -66,6 +75,11 @@ model Message {
   content        String
   metadata       String?      // JSON
   createdAt      DateTime     @default(now())
+
+  // Indexes for query performance on large conversations
+  @@index([conversationId, role])
+  @@index([conversationId, agentId])
+  @@index([conversationId, createdAt])
 }
 
 model Escalation {
@@ -77,6 +91,8 @@ model Escalation {
   answer         String?
   status         String       @default("pending") // "pending" | "answered"
   createdAt      DateTime     @default(now())
+
+  @@index([conversationId, status])
 }
 
 model AgentContext {
@@ -118,6 +134,8 @@ model TestRun {
   summary        String?
   testCases      TestCase[]
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
 }
 
 model TestCase {
@@ -128,4 +146,118 @@ model TestCase {
   error     String?
   duration  Int?    // milliseconds
   testRun   TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+}
+
+// ==================== PROGRESS TRACKING FOR MULTI-DAY PROJECTS ====================
+
+model ProjectProgress {
+  id             String       @id @default(cuid())
+  conversationId String       @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // High-level tracking
+  projectName    String       // e.g., "Medusa Ecommerce Implementation"
+  objective      String       // The main goal
+  currentPhase   String       @default("planning") // planning, implementation, testing, review, complete
+  overallStatus  String       @default("in_progress") // in_progress, blocked, paused, complete
+
+  // Progress metrics
+  totalPhases    Int          @default(0)
+  completedPhases Int         @default(0)
+
+  // Timestamps
+  startedAt      DateTime     @default(now())
+  lastActiveAt   DateTime     @default(now())
+  completedAt    DateTime?
+
+  // Relations
+  phases         ProgressPhase[]
+  fileChanges    FileChange[]
+  decisions      Decision[]
+  checkpoints    Checkpoint[]
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model ProgressPhase {
+  id          String          @id @default(cuid())
+  progressId  String
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
+
+  name        String          // e.g., "Database Schema Design"
+  description String          // What this phase involves
+  status      String          @default("pending") // pending, in_progress, completed, blocked, skipped
+  orderIndex  Int             @default(0)
+
+  // Tracking
+  assignedTo  String?         // Agent name that worked on this
+  result      String?         // Summary of what was done
+  blockedBy   String?         // What's blocking this phase
+
+  // Timestamps
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([progressId, status])
+  @@index([progressId, orderIndex])
+}
+
+model FileChange {
+  id          String          @id @default(cuid())
+  progressId  String
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
+
+  filePath    String          // Path to the file
+  changeType  String          // created, modified, deleted
+  description String          // What was changed and why
+  agentName   String?         // Which agent made the change
+  phaseId     String?         // Which phase this belongs to
+
+  createdAt   DateTime        @default(now())
+
+  @@index([progressId, createdAt])
+}
+
+model Decision {
+  id          String          @id @default(cuid())
+  progressId  String
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
+
+  topic       String          // e.g., "Authentication Method"
+  question    String          // The question that was decided
+  decision    String          // What was decided
+  rationale   String?         // Why this decision was made
+  madeBy      String          // "user" or agent name
+  phaseId     String?         // Which phase this relates to
+
+  // Tracking if decision needs revisiting
+  revisitFlag Boolean         @default(false)
+  revisitNote String?
+
+  createdAt   DateTime        @default(now())
+
+  @@index([progressId, createdAt])
+  @@index([progressId, revisitFlag])
+}
+
+model Checkpoint {
+  id          String          @id @default(cuid())
+  progressId  String
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
+
+  name        String          // e.g., "End of Day 1", "Before Major Refactor"
+  description String          // What state the project is in
+
+  // Snapshot of state
+  phaseSnapshot    String     // JSON: which phases were complete
+  pendingTasks     String     // JSON: what still needs to be done
+  contextSummary   String     // Comprehensive summary for resuming
+
+  createdAt   DateTime        @default(now())
+
+  @@index([progressId, createdAt])
 }
