@@ -10,6 +10,7 @@ interface RunAgentOptions {
   prompt: string;
   systemPrompt: string;
   model: string;
+  providerId?: string; // NEW: Provider ID for multi-provider routing (future use)
   role: string;
   images?: ImageInput[];
   workingDirectory?: string;
@@ -33,6 +34,7 @@ export async function runAgent({
   prompt,
   systemPrompt,
   model,
+  providerId = "anthropic", // Default to Anthropic for backward compatibility
   role,
   workingDirectory,
   maxTurns: maxTurnsOverride,
@@ -46,6 +48,12 @@ export async function runAgent({
   if (signal && !providedAbortController) {
     if (signal.aborted) return { text: "[Job stopped by the boss]" };
     signal.addEventListener("abort", () => abortController.abort(), { once: true });
+  }
+
+  // PHASE 1: Only support Anthropic for now - log if non-Anthropic provider requested
+  if (providerId !== "anthropic") {
+    console.warn(`[AgentMafia] Non-Anthropic provider requested (${providerId}) but not yet implemented. Falling back to Anthropic.`);
+    // Phase 2 will handle actual multi-provider execution here
   }
 
   // Strip ANTHROPIC_API_KEY from env so the CLI uses its own stored credentials

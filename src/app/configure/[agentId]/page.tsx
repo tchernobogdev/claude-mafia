@@ -21,11 +21,20 @@ interface Agent {
   specialty: string | null;
   systemPrompt: string;
   model: string;
+  providerId: string;
   parentId: string | null;
   parent: { name: string; role: string } | null;
   children: { id: string; name: string; role: string }[];
   outgoingRels: Relationship[];
   incomingRels: Relationship[];
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  isConfigured: boolean;
+  models: string[];
+  configHint?: string;
 }
 
 interface AgentListItem {
@@ -48,12 +57,14 @@ export default function AgentConfigPage() {
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [allAgents, setAllAgents] = useState<AgentListItem[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
     systemPrompt: "",
     model: "",
+    providerId: "anthropic",
     specialty: "",
     role: "",
     parentId: "",
@@ -71,6 +82,7 @@ export default function AgentConfigPage() {
         name: data.name,
         systemPrompt: data.systemPrompt,
         model: data.model,
+        providerId: data.providerId || "anthropic",
         specialty: data.specialty || "",
         role: data.role,
         parentId: data.parentId || "",
@@ -94,7 +106,24 @@ export default function AgentConfigPage() {
         setError("Failed to load agents list.");
       }
     };
+    const loadProviders = async () => {
+      try {
+        const res = await fetch("/api/providers");
+        if (res.ok) {
+          const data = await res.json();
+          setProviders(data.providers || []);
+        }
+      } catch (err) {
+        console.error("LoadProviders:", err);
+        // Non-critical - use default providers
+        setProviders([
+          { id: "anthropic", name: "Anthropic (Claude)", isConfigured: true, models: ["claude-sonnet-4-5-20250929", "claude-opus-4-5-20251101", "claude-haiku-4-5-20251001"] },
+          { id: "kimi", name: "Kimi 2.5 (Moonshot)", isConfigured: false, models: ["kimi-2.5-latest"], configHint: "Set KIMI_API_KEY in .env" },
+        ]);
+      }
+    };
     loadAllAgents();
+    loadProviders();
   }, [loadAgent]);
 
   const save = async () => {
@@ -105,7 +134,12 @@ export default function AgentConfigPage() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...form,
+          name: form.name,
+          systemPrompt: form.systemPrompt,
+          model: form.model,
+          providerId: form.providerId,
+          specialty: form.specialty || null,
+          role: form.role,
           parentId: form.parentId || null,
         }),
       });
@@ -221,15 +255,50 @@ export default function AgentConfigPage() {
             </select>
           </div>
           <div>
+            <label className="text-xs text-text-muted block mb-1">Provider</label>
+            <select
+              value={form.providerId}
+              onChange={(e) => {
+                const newProvider = providers.find(p => p.id === e.target.value);
+                setForm({
+                  ...form,
+                  providerId: e.target.value,
+                  // Reset model to first available for new provider
+                  model: newProvider?.models[0] || form.model
+                });
+              }}
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-accent"
+            >
+              {providers.map((p) => (
+                <option key={p.id} value={p.id} disabled={!p.isConfigured}>
+                  {p.name} {!p.isConfigured ? "(not configured)" : ""}
+                </option>
+              ))}
+            </select>
+            {providers.find(p => p.id === form.providerId && !p.isConfigured)?.configHint && (
+              <p className="text-xs text-warning mt-1">
+                {providers.find(p => p.id === form.providerId)?.configHint}
+              </p>
+            )}
+          </div>
+          <div>
             <label className="text-xs text-text-muted block mb-1">Model</label>
             <select
               value={form.model}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
               className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-accent"
             >
-              <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
-              <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
-              <option value="claude-opus-4-5-20251101">Opus 4.5</option>
+              {(providers.find(p => p.id === form.providerId)?.models || []).map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+              {/* Fallback options if provider not found */}
+              {!providers.find(p => p.id === form.providerId) && (
+                <>
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                  <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+                  <option value="claude-opus-4-5-20251101">Opus 4.5</option>
+                </>
+              )}
             </select>
           </div>
           <div>

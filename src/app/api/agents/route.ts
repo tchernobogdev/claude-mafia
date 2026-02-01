@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
         specialty: body.specialty || null,
         systemPrompt: body.systemPrompt || "",
         model: body.model || "claude-sonnet-4-5-20250929",
+        providerId: body.providerId || "anthropic",
         parentId: body.parentId || null,
         posX: body.posX ?? 100,
         posY: body.posY ?? 100,
