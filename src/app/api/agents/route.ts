@@ -18,9 +18,27 @@ export async function GET(req: NextRequest) {
   }
 }
 
+// Roles that require full tool support (only Anthropic)
+const TOOL_REQUIRED_ROLES = ["underboss", "capo", "soldier"];
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+
+    // Validate: non-Anthropic providers can only be used for analysis roles
+    const providerId = body.providerId || "anthropic";
+    const role = body.role || "soldier";
+
+    if (providerId !== "anthropic" && TOOL_REQUIRED_ROLES.includes(role)) {
+      return NextResponse.json(
+        {
+          error: `Provider "${providerId}" cannot be used for role "${role}". Non-Anthropic providers (Kimi, OpenAI) can only analyze/report, not execute tasks. Use Anthropic for agents that need to delegate, execute code, or use tools.`,
+          hint: "Kimi is best used as a visual analysis helper, not as a task executor in the hierarchy."
+        },
+        { status: 400 }
+      );
+    }
+
     const agent = await prisma.agent.create({
       data: {
         name: body.name,

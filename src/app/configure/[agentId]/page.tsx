@@ -280,6 +280,11 @@ export default function AgentConfigPage() {
                 {providers.find(p => p.id === form.providerId)?.configHint}
               </p>
             )}
+            {form.providerId !== "anthropic" && ["underboss", "capo", "soldier"].includes(form.role) && (
+              <p className="text-xs text-red-400 mt-1">
+                Warning: {form.providerId} cannot execute tasks - only Anthropic agents can delegate, run code, and use tools. Consider using Anthropic for this role.
+              </p>
+            )}
           </div>
           <div>
             <label className="text-xs text-text-muted block mb-1">Model</label>
