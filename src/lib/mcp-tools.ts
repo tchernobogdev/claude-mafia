@@ -67,7 +67,14 @@ export async function buildAgentMcpServer(
     const targetDesc = delegateRels.map((r) => describeAgent(r.toAgent)).join("\n");
     tools.push({
       name: "delegate_task",
-      description: `Delegate a task to one or more subordinate agents in parallel. Choose agents based on their specialty.\n\nAvailable targets:\n${targetDesc}`,
+      description: `Delegate a task to one or more subordinate agents in parallel. Choose agents based on their specialty.
+
+IMPORTANT: When you receive a result from delegation:
+- If the result is a COMPLETED report → process it and continue
+- If the result is an ACKNOWLEDGMENT (e.g., "I'm on it, starting work...") → the subordinate is still working. You MUST call wait_for_messages to wait for their final report. DO NOT just say "I'll wait" - that will end your turn prematurely.
+
+Available targets:
+${targetDesc}`,
       inputSchema: {
         targets: z.array(z.string()).describe("Array of agent IDs to delegate to"),
         task: z.string().describe("The task description to delegate"),
@@ -219,7 +226,14 @@ export async function buildAgentMcpServer(
   // wait_for_messages: block until a question arrives or shutdown
   tools.push({
     name: "wait_for_messages",
-    description: "Wait for incoming questions from other agents. Blocks until a message arrives or the job ends. Call this after submit_result to enter standby mode.",
+    description: `Wait for incoming messages from subordinates or other agents. Blocks until a message arrives or the job ends.
+
+CRITICAL: You MUST call this tool when:
+1. You delegated work and are waiting for subordinates to report back
+2. A subordinate said they're starting multi-phase work (e.g., "I'll do recon then implementation")
+3. After submit_result to enter standby mode for follow-up questions
+
+WARNING: If you just say "I'll wait for them to report back" WITHOUT calling this tool, your turn will END and the job will complete prematurely. You must ALWAYS call wait_for_messages to actually wait - don't just describe waiting in text.`,
     inputSchema: {},
     handler: async () => {
       const instance = agentPool.get(context.conversationId, agentId);
@@ -244,7 +258,9 @@ export async function buildAgentMcpServer(
   // respond_to_message: answer a question received via mailbox
   tools.push({
     name: "respond_to_message",
-    description: "Respond to a question received via wait_for_messages. After responding, call wait_for_messages again to continue standby.",
+    description: `Respond to a message received via wait_for_messages.
+
+CRITICAL: After calling this tool, you MUST immediately call wait_for_messages again to continue receiving messages. DO NOT just say "I'll wait for more" - that text-only response will END your turn. Always follow respond_to_message with wait_for_messages.`,
     inputSchema: {
       messageId: z.string().describe("The messageId from the incoming question"),
       response: z.string().describe("Your response to the question"),
