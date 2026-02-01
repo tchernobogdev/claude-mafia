@@ -22,6 +22,7 @@ export async function POST(req: NextRequest) {
   const task = body.task as string;
   const images = body.images as ImageInput[] | undefined;
   const workingDirectory = body.workingDirectory as string | undefined;
+  const dynamicMode = body.dynamicMode as boolean | undefined;
 
   if (!task) {
     return NextResponse.json({ error: "Task is required" }, { status: 400 });
@@ -32,7 +33,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Start task in background - don't await
-  const conversationIdPromise = startTask(task, images, workingDirectory);
+  const conversationIdPromise = startTask(task, images, workingDirectory, dynamicMode);
 
   // We need to return the conversation ID, so we await it briefly
   // The orchestrator will continue running

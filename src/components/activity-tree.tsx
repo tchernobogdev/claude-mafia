@@ -72,6 +72,11 @@ const ACTION_COLORS: Record<string, string> = {
   response: "#22c55e",
   thinking: "#94a3b8",
   delegating: "#a78bfa",
+  // Tester-specific actions
+  execute_code: "#c084fc",
+  run_build: "#f59e0b",
+  open_browser: "#3b82f6",
+  run_tests: "#22c55e",
 };
 
 const ACTION_SHORT: Record<string, string> = {
@@ -82,6 +87,11 @@ const ACTION_SHORT: Record<string, string> = {
   respond_to_message: "respond",
   escalate_to_boss: "escalate",
   response: "response",
+  // Tester-specific actions
+  execute_code: "exec",
+  run_build: "build",
+  open_browser: "browser",
+  run_tests: "test",
 };
 
 const ARROW_LIFETIME = 4000;
@@ -89,7 +99,7 @@ const RESPONSE_ARROW_LIFETIME = 6000;
 const NOTIF_LIFETIME = 3000;
 const NOTIF_FLOAT_DISTANCE = 50; // SVG units to float upward
 
-const NON_COMM_TOOLS = new Set(["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "WebFetch", "WebSearch", "TodoWrite"]);
+const NON_COMM_TOOLS = new Set(["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "WebFetch", "WebSearch", "TodoWrite", "execute_code", "run_build", "open_browser", "run_tests"]);
 const TOOL_NOTIF_LABELS: Record<string, string> = {
   Read: "📖 read file",
   Write: "✏️ write file",
@@ -101,6 +111,11 @@ const TOOL_NOTIF_LABELS: Record<string, string> = {
   WebFetch: "🌐 web fetch",
   WebSearch: "🔎 web search",
   TodoWrite: "📝 todo",
+  // Tester-specific tool notifications
+  execute_code: "⚡ execute code",
+  run_build: "🔨 build",
+  open_browser: "🌐 browser",
+  run_tests: "✓ run tests",
 };
 const NODE_RADIUS = 18;
 const NODE_COL_WIDTH = 120;
@@ -108,10 +123,13 @@ const LEVEL_HEIGHT = 110;
 
 interface Props {
   activity: TreeActivityItem[];
+  conversationId?: string;
 }
 
-export function ActivityTree({ activity }: Props) {
+export function ActivityTree({ activity, conversationId }: Props) {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [arrows, setArrows] = useState<ArrowAnim[]>([]);
   const [floatingNotifs, setFloatingNotifs] = useState<FloatingNotif[]>([]);
   const [activeAgentIds, setActiveAgentIds] = useState<Set<string>>(new Set());
@@ -120,10 +138,22 @@ export function ActivityTree({ activity }: Props) {
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    fetch("/api/agents")
-      .then((r) => r.json())
-      .then((data: Agent[]) => setAgents(data));
-  }, []);
+    setIsLoading(true);
+    setFetchError(null);
+    fetch(`/api/agents${conversationId ? `?conversationId=${conversationId}` : ''}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`Failed to fetch agents (${r.status})`);
+        return r.json();
+      })
+      .then((data: Agent[]) => {
+        setAgents(data);
+        setIsLoading(false);
+      })
+      .catch((err) => {
+        setFetchError(err.message || "Failed to load agents");
+        setIsLoading(false);
+      });
+  }, [conversationId]);
 
   // Build tree layout with no overlap — each node gets its own column
   const { nodes, staticEdges, viewW, viewH, parentMap } = useMemo(() => {
@@ -337,8 +367,16 @@ export function ActivityTree({ activity }: Props) {
     return () => clearInterval(interval);
   }, []);
 
-  if (nodes.length === 0) {
+  if (isLoading) {
     return <div className="flex items-center justify-center h-full text-xs text-text-muted">Loading hierarchy...</div>;
+  }
+
+  if (fetchError) {
+    return <div className="flex items-center justify-center h-full text-xs text-red-400">Error: {fetchError}</div>;
+  }
+
+  if (nodes.length === 0) {
+    return <div className="flex items-center justify-center h-full text-xs text-text-muted">No agents found</div>;
   }
 
   return (

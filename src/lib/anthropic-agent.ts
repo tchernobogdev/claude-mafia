@@ -70,6 +70,11 @@ export async function runAgent({
     options.cwd = workingDirectory;
   }
 
+  // Enable browser automation for tester agents
+  if (role === "tester") {
+    options.enableChrome = true;
+  }
+
   // Attach MCP server if provided (delegation tools for managers, or subordinate tools for soldiers with reports)
   if (mcpServer) {
     options.mcpServers = { agentmafia: mcpServer };

@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ActivityTree, type TreeActivityItem } from "../../../components/activity-tree";
+import { CodeExecutionPanel, type CodeExecutionResult, parseCompilationErrors } from "../../../components/code-execution-panel";
 
 interface Message {
   id: string;
@@ -71,6 +72,11 @@ const TOOL_LABELS: Record<string, string> = {
   write_file: "Wrote file",
   list_files: "Listed files",
   run_command: "Ran command",
+  // Tester-specific tools
+  execute_code: "Executed code",
+  run_build: "Built project",
+  open_browser: "Opened browser",
+  run_tests: "Ran tests",
 };
 
 function parseMetadata(meta: string | null): Record<string, unknown> | null {
@@ -101,11 +107,18 @@ export default function ConversationPage() {
   const [stepIndex, setStepIndex] = useState(-1);
   const [isStepMode, setIsStepMode] = useState(false);
 
+  // Dynamic org state
+  const [isDynamicOrg, setIsDynamicOrg] = useState(false);
+  const [exportCopied, setExportCopied] = useState(false);
+
   // Activity detail panel
   const [selectedActivity, setSelectedActivity] = useState<ActivityItem | null>(null);
 
   // Activity view mode: list or tree
   const [activityView, setActivityView] = useState<"list" | "tree">("list");
+
+  // Tester agent execution results
+  const [executionResults, setExecutionResults] = useState<CodeExecutionResult[]>([]);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const activityBottomRef = useRef<HTMLDivElement>(null);
@@ -169,9 +182,21 @@ export default function ConversationPage() {
 
   useEffect(() => {
     loadConversation();
+    // Stop polling if conversation is completed or stopped
+    if (status === "completed" || status === "stopped") {
+      return; // No polling needed for finished conversations
+    }
     const interval = setInterval(loadConversation, 3000);
     return () => clearInterval(interval);
-  }, [loadConversation]);
+  }, [loadConversation, status]);
+
+  // Check if this conversation used dynamic organization
+  useEffect(() => {
+    fetch(`/api/conversations/${conversationId}/org`)
+      .then((res) => res.json())
+      .then((data) => { if (data.dynamic) setIsDynamicOrg(true); })
+      .catch(() => {});
+  }, [conversationId]);
 
   // SSE connection
   useEffect(() => {
@@ -222,6 +247,43 @@ export default function ConversationPage() {
     evtSource.addEventListener("task_stopped", () => {
       setStatus("stopped");
       loadConversation();
+    });
+
+    // Tester agent execution events
+    evtSource.addEventListener("code_execution", (e) => {
+      const data = JSON.parse(e.data);
+      const result: CodeExecutionResult = {
+        status: data.success ? "success" : "error",
+        stdout: data.stdout,
+        stderr: data.stderr,
+        exitCode: data.exitCode,
+        errors: data.stderr ? parseCompilationErrors(data.stderr) : undefined,
+        timestamp: Date.now(),
+      };
+      setExecutionResults((prev) => [...prev, result]);
+    });
+
+    evtSource.addEventListener("browser_opened", (e) => {
+      const data = JSON.parse(e.data);
+      const result: CodeExecutionResult = {
+        status: "success",
+        browserUrl: data.url,
+        browserStatus: data.status || "Browser opened successfully",
+        timestamp: Date.now(),
+      };
+      setExecutionResults((prev) => [...prev, result]);
+    });
+
+    evtSource.addEventListener("build_complete", (e) => {
+      const data = JSON.parse(e.data);
+      const result: CodeExecutionResult = {
+        status: data.success ? "success" : "error",
+        stdout: data.output,
+        stderr: data.errors,
+        errors: data.errors ? parseCompilationErrors(data.errors) : undefined,
+        timestamp: Date.now(),
+      };
+      setExecutionResults((prev) => [...prev, result]);
     });
 
     return () => evtSource.close();
@@ -324,6 +386,23 @@ export default function ConversationPage() {
   const enterStepMode = () => { setIsStepMode(true); setStepIndex(0); };
   const exitStepMode = () => { setIsStepMode(false); setStepIndex(-1); };
 
+  const exportDynamicOrg = async () => {
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}/org`);
+      if (!res.ok) throw new Error("Failed to fetch org");
+      const data = await res.json();
+      const exportData = { agents: data.agents, relationships: data.relationships };
+      const jsonString = JSON.stringify(exportData);
+      const base64 = btoa(unescape(encodeURIComponent(jsonString)));
+      await navigator.clipboard.writeText(base64);
+      setExportCopied(true);
+      setTimeout(() => setExportCopied(false), 2000);
+    } catch (err) {
+      console.error("ExportOrg:", err);
+      setError("Failed to export organization.");
+    }
+  };
+
   const visibleActivity = isStepMode ? activity.slice(0, stepIndex + 1) : activity;
   const currentStep = isStepMode && stepIndex >= 0 ? activity[stepIndex] : null;
 
@@ -401,6 +480,14 @@ export default function ConversationPage() {
               {isStepMode ? "Exit Step-Through" : "Step-Through Replay"}
             </button>
           )}
+          {isDynamicOrg && (
+            <button
+              onClick={exportDynamicOrg}
+              className="text-xs px-3 py-1.5 rounded border border-accent/50 text-accent hover:bg-accent hover:text-white transition-colors flex items-center gap-1.5"
+            >
+              {exportCopied ? "✓ Copied!" : "Export Org"}
+            </button>
+          )}
           <span className={`text-xs px-2 py-0.5 rounded ${status === "active" ? "bg-accent/20 text-accent" : status === "completed" ? "bg-success/20 text-success" : status === "stopped" ? "bg-danger/20 text-danger" : "bg-border text-text-muted"}`}>
             {status}
           </span>
@@ -453,6 +540,25 @@ export default function ConversationPage() {
           </div>
         </div>
       ))}
+
+      {/* Tester Execution Results */}
+      {executionResults.length > 0 && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold text-text flex items-center gap-2">
+            <span className="text-accent">⚡</span>
+            Code Execution & Testing
+          </h2>
+          <div className="space-y-3">
+            {executionResults.map((result, idx) => (
+              <CodeExecutionPanel
+                key={idx}
+                result={result}
+                title={`Execution ${idx + 1}`}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-4">
         {/* Messages */}
@@ -573,7 +679,7 @@ export default function ConversationPage() {
           {/* Tree view */}
           {activityView === "tree" && (
             <div className="flex-1 overflow-y-auto p-2" style={{ background: "#08080f" }}>
-              <ActivityTree activity={activity as TreeActivityItem[]} />
+              <ActivityTree conversationId={isDynamicOrg ? conversationId : undefined} activity={activity as TreeActivityItem[]} />
             </div>
           )}
 

@@ -38,14 +38,17 @@ export default function ReportPage() {
         setError("Failed to load report. Please try again.");
       }
     }
-  }, [conversationId, data]);
+  }, [conversationId]);
 
   useEffect(() => {
     load();
-    // Poll until completed
+    // Poll until completed - stop polling if conversation is completed
+    if (data?.status === "completed") {
+      return; // Don't set up interval if already completed
+    }
     const interval = setInterval(load, 3000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [load, data?.status]);
 
   if (!data) return <div className="text-text-muted text-sm p-8">Loading...</div>;
 

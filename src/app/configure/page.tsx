@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 interface Agent {
   id: string;
@@ -97,8 +97,11 @@ const BOSS_NODE: Agent = {
   incomingRels: [],
 };
 
-export default function ConfigurePage() {
+function ConfigurePageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const pendingConversationId = searchParams.get("conversationId");
+  const pendingTask = searchParams.get("pendingTask");
   const canvasRef = useRef<HTMLDivElement>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [relationships, setRelationships] = useState<Relationship[]>([]);
@@ -126,13 +129,22 @@ export default function ConfigurePage() {
   const [importError, setImportError] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [executing, setExecuting] = useState(false);
+  const [templates, setTemplates] = useState<unknown[]>([]);
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [showLoadTemplates, setShowLoadTemplates] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
 
   // All nodes including boss
   const allNodes = [BOSS_NODE, ...agents];
 
   const loadData = useCallback(async () => {
     try {
-      const agentsRes = await fetch("/api/agents");
+      const agentsUrl = pendingConversationId
+        ? `/api/agents?conversationId=${pendingConversationId}`
+        : "/api/agents";
+      const agentsRes = await fetch(agentsUrl);
       if (!agentsRes.ok) throw new Error(`Request failed (${agentsRes.status})`);
       const agentsData = await agentsRes.json();
       setAgents(agentsData);
@@ -140,12 +152,19 @@ export default function ConfigurePage() {
       const relsRes = await fetch("/api/relationships");
       if (!relsRes.ok) throw new Error(`Request failed (${relsRes.status})`);
       const relsData = await relsRes.json();
-      setRelationships(relsData);
+
+      if (pendingConversationId) {
+        const agentIds = new Set(agentsData.map((a: Agent) => a.id));
+        const filteredRels = relsData.filter((r: Relationship) => agentIds.has(r.fromAgentId) && agentIds.has(r.toAgentId));
+        setRelationships(filteredRels);
+      } else {
+        setRelationships(relsData);
+      }
     } catch (err) {
       console.error("LoadData:", err);
       setError("Failed to load data. Please try again.");
     }
-  }, []);
+  }, [pendingConversationId]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -293,6 +312,17 @@ export default function ConfigurePage() {
       setImportError(err instanceof Error ? err.message : "Invalid import data. Please check the format.");
     } finally {
       setImporting(false);
+    }
+  };
+
+  const loadTemplates = async () => {
+    try {
+      const res = await fetch("/api/org-templates");
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = await res.json();
+      setTemplates(data);
+    } catch (err) {
+      console.error("LoadTemplates:", err);
     }
   };
 
@@ -594,6 +624,23 @@ export default function ConfigurePage() {
             ))}
           </div>
           <button
+            onClick={() => {
+              setShowSaveTemplate(true);
+            }}
+            className="bg-bg-card border border-border text-text text-sm px-4 py-2 rounded transition-colors hover:bg-bg-hover"
+          >
+            Save as Template
+          </button>
+          <button
+            onClick={() => {
+              setShowLoadTemplates(true);
+              loadTemplates();
+            }}
+            className="bg-bg-card border border-border text-text text-sm px-4 py-2 rounded transition-colors hover:bg-bg-hover"
+          >
+            Load Template
+          </button>
+          <button
             onClick={handleExport}
             className="bg-bg-card border border-border text-text text-sm px-4 py-2 rounded transition-colors hover:bg-bg-hover"
           >
@@ -613,6 +660,38 @@ export default function ConfigurePage() {
           </button>
         </div>
       </div>
+
+      {pendingTask && pendingConversationId && (
+        <div className="bg-accent/10 border border-accent/30 rounded-lg p-4 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium text-accent">Pending Task</div>
+            <p className="text-xs text-text-muted mt-1">{decodeURIComponent(pendingTask)}</p>
+          </div>
+          <button
+            onClick={async () => {
+              setExecuting(true);
+              try {
+                const res = await fetch(`/api/conversation/${pendingConversationId}/execute`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ task: decodeURIComponent(pendingTask) }),
+                });
+                if (!res.ok) throw new Error("Failed to execute");
+                router.push(`/conversation/${pendingConversationId}`);
+              } catch (err) {
+                console.error("Execute:", err);
+                setError("Failed to execute task.");
+              } finally {
+                setExecuting(false);
+              }
+            }}
+            disabled={executing}
+            className="bg-accent hover:bg-accent-hover text-white text-sm px-6 py-2 rounded-lg transition-colors font-medium"
+          >
+            {executing ? "Executing..." : "Execute Task"}
+          </button>
+        </div>
+      )}
 
       {showForm && (
         <div className="bg-bg-card border border-border rounded-lg p-4 space-y-3">
@@ -1089,7 +1168,166 @@ export default function ConfigurePage() {
           </div>
         </div>
       )}
+
+      {/* Save Template Modal */}
+      {showSaveTemplate && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-bg-card border border-border rounded-lg p-6 w-full max-w-md">
+            <h2 className="text-lg font-bold mb-4">Save as Template</h2>
+            <input
+              value={templateName}
+              onChange={(e) => setTemplateName(e.target.value)}
+              placeholder="Template name..."
+              className="w-full bg-bg border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-accent mb-4"
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowSaveTemplate(false);
+                  setTemplateName("");
+                }}
+                className="text-text-muted text-sm px-3 py-1.5 hover:text-text"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  if (!templateName.trim()) return;
+                  setSavingTemplate(true);
+                  try {
+                    await fetch("/api/org-templates", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ name: templateName, agents, relationships }),
+                    });
+                    setShowSaveTemplate(false);
+                    setTemplateName("");
+                  } catch (err) {
+                    console.error(err);
+                    setError("Failed to save template.");
+                  } finally {
+                    setSavingTemplate(false);
+                  }
+                }}
+                disabled={savingTemplate || !templateName.trim()}
+                className="bg-accent hover:bg-accent-hover text-white text-sm px-4 py-1.5 rounded disabled:opacity-50"
+              >
+                {savingTemplate ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Load Template Modal */}
+      {showLoadTemplates && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-bg-card border border-border rounded-lg p-6 w-full max-w-lg">
+            <h2 className="text-lg font-bold mb-4">Load Template</h2>
+            {templates.length === 0 ? (
+              <p className="text-text-muted text-sm">No templates saved yet.</p>
+            ) : (
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {templates.map((t: any) => (
+                  <div key={t.id} className="flex items-center justify-between bg-bg rounded p-3 border border-border">
+                    <div>
+                      <div className="text-sm font-medium">{t.name}</div>
+                      <div className="text-xs text-text-muted">{new Date(t.createdAt).toLocaleDateString()}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={async () => {
+                          try {
+                            const agentsData = typeof t.agents === "string" ? JSON.parse(t.agents) : t.agents;
+                            const relsData = typeof t.relationships === "string" ? JSON.parse(t.relationships) : t.relationships;
+                            const idMapping: Record<string, string> = {};
+                            for (const agent of agentsData) {
+                              const res = await fetch("/api/agents", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  name: agent.name,
+                                  role: agent.role,
+                                  specialty: agent.specialty,
+                                  systemPrompt: agent.systemPrompt,
+                                  model: agent.model,
+                                  parentId: null,
+                                  posX: agent.posX ?? 100 + Math.random() * 400,
+                                  posY: agent.posY ?? 100 + Math.random() * 300
+                                }),
+                              });
+                              if (!res.ok) throw new Error("Failed to create agent");
+                              const newAgent = await res.json();
+                              idMapping[agent.id] = newAgent.id;
+                            }
+                            for (const agent of agentsData) {
+                              if (agent.parentId && idMapping[agent.parentId]) {
+                                await fetch(`/api/agents/${idMapping[agent.id]}`, {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ parentId: idMapping[agent.parentId] }),
+                                });
+                              }
+                            }
+                            for (const rel of relsData) {
+                              const fromId = idMapping[rel.fromAgentId];
+                              const toId = idMapping[rel.toAgentId];
+                              if (!fromId || !toId) continue;
+                              await fetch("/api/relationships", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ fromAgentId: fromId, toAgentId: toId, action: rel.action, cardinality: rel.cardinality }),
+                              });
+                            }
+                            await loadData();
+                            setShowLoadTemplates(false);
+                          } catch (err) {
+                            console.error(err);
+                            setError("Failed to load template.");
+                          }
+                        }}
+                        className="text-xs px-3 py-1 rounded bg-accent/10 text-accent hover:bg-accent hover:text-white transition-colors"
+                      >
+                        Load
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await fetch(`/api/org-templates/${t.id}`, { method: "DELETE" });
+                            loadTemplates();
+                          } catch (err) {
+                            console.error(err);
+                          }
+                        }}
+                        className="text-xs px-2 py-1 text-danger hover:bg-danger/10 rounded transition-colors"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={() => setShowLoadTemplates(false)}
+                className="text-text-muted text-sm px-3 py-1.5 hover:text-text"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+export default function ConfigurePage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <ConfigurePageInner />
+    </Suspense>
   );
 }
 

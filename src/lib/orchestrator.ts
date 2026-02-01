@@ -3,6 +3,7 @@ import { runAgent, type ImageInput } from "./anthropic-agent";
 import { buildAgentMcpServer } from "./mcp-tools";
 import { sseManager } from "./sse";
 import { agentPool, AgentMailbox, type AgentInstance } from "./agent-pool";
+import { buildDynamicOrg } from "./dynamic-org-builder";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -117,7 +118,7 @@ As a capo, when you receive a task, delegate it to your soldiers. Review their r
   }
 
   if (role === "tester") {
-    return base + `\n\nTESTER DIRECTIVE: You are a tester with browser automation capabilities via the --chrome flag. Your job is to verify, test, and validate work done by other agents. You can:\n- Navigate to web pages and interact with the UI\n- Verify visual elements, layouts, and user flows\n- Check console errors, network requests, and page behavior\n- Take screenshots and record test results\n- Report bugs and issues back to the underboss\n\nAfter testing, compile a detailed test report with: what was tested, pass/fail status for each test, any bugs found, and screenshots if relevant.`;
+    return base + `\n\nTESTER DIRECTIVE: You are a tester with browser automation capabilities. Your job is to verify, test, and validate work done by other agents.\n\nYou have access to specialized MCP testing tools:\n- execute_code: Run TypeScript/JavaScript/Python code in sandbox, get structured compilation errors\n- run_build: Execute build commands (npm run build, tsc --noEmit), get compilation errors with file/line/column info\n- run_tests: Run test suites (jest/vitest/pytest/mocha), get structured pass/fail results with test case details\n\nFor browser automation, you have Claude Code's built-in chrome tools via the claude-in-chrome MCP server:\n- mcp__claude-in-chrome__navigate: Open URLs in Chrome for visual testing\n- mcp__claude-in-chrome__read_console_messages: Check browser console errors\n- mcp__claude-in-chrome__screenshot: Capture screenshots of pages\n- mcp__claude-in-chrome__click, type, scroll: Interact with UI elements\n\nWorkflow: Use execute_code to run/compile code, run_build to check for compilation errors, run_tests to execute test suites, and the claude-in-chrome tools to debug websites in the browser. After testing, compile a detailed report with: what was tested, pass/fail status, bugs found, and screenshots if relevant.`;
   }
 
   return base + `
@@ -329,21 +330,168 @@ export async function executeAgent({
   return result;
 }
 
-export async function startTask(task: string, images?: ImageInput[], workingDirectory?: string): Promise<string> {
+export async function createDynamicOrg(task: string, workingDirectory?: string) {
+  console.log("[Dynamic Mode] Building custom organization for task...");
+
+  // Create conversation FIRST with pending status
+  const conversation = await prisma.conversation.create({
+    data: {
+      title: task.slice(0, 100),
+      workingDirectory,
+      status: "pending"
+    },
+  });
+
+  const orgDesign = await buildDynamicOrg(task);
+
+  // Create agents in DB
+  const agentMap = new Map<string, string>(); // name -> id
+  let agentIndex = 0;
+  const createdAgents = [];
+  for (const agentSpec of orgDesign.agents) {
+    const posX = 100 + (agentIndex % 4) * 250;
+    const posY = 100 + Math.floor(agentIndex / 4) * 200;
+
+    const agent = await prisma.agent.create({
+      data: {
+        name: agentSpec.name,
+        role: agentSpec.role,
+        specialty: agentSpec.specialty,
+        systemPrompt: agentSpec.systemPrompt,
+        model: agentSpec.model,
+        isDynamic: true,
+        conversationId: conversation.id,
+        posX,
+        posY,
+        orderIndex: agentIndex,
+      },
+    });
+    agentMap.set(agentSpec.name, agent.id);
+    createdAgents.push(agent);
+    agentIndex++;
+  }
+
+  // Create relationships in DB
+  const createdRelationships = [];
+  for (const rel of orgDesign.relationships) {
+    const fromId = agentMap.get(rel.fromName);
+    const toId = agentMap.get(rel.toName);
+    if (!fromId || !toId) {
+      console.warn(`[Dynamic Mode] Could not find agent IDs for relationship: ${rel.fromName} -> ${rel.toName}`);
+      continue;
+    }
+    const relationship = await prisma.relationship.create({
+      data: {
+        fromAgentId: fromId,
+        toAgentId: toId,
+        action: rel.action,
+        cardinality: "1:1",
+      },
+    });
+    createdRelationships.push(relationship);
+  }
+
+  // Set parentId for hierarchy (used by activity-tree.tsx)
+  for (const rel of orgDesign.relationships) {
+    if (rel.action === "delegate") {
+      const fromId = agentMap.get(rel.fromName);
+      const toId = agentMap.get(rel.toName);
+      if (fromId && toId) {
+        await prisma.agent.update({ where: { id: toId }, data: { parentId: fromId } });
+      }
+    }
+  }
+
+  console.log(`[Dynamic Mode] Organization built: ${orgDesign.agents.length} agents`);
+
+  return {
+    conversationId: conversation.id,
+    agents: createdAgents,
+    relationships: createdRelationships
+  };
+}
+
+export async function executeConversation(conversationId: string, task: string, images?: ImageInput[]) {
+  // Load the conversation from DB to get workingDirectory
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+  });
+  if (!conversation) throw new Error("Conversation not found");
+
+  // Find the underboss for this conversation (check dynamic first, fallback to static)
+  let underboss = await prisma.agent.findFirst({
+    where: { role: "underboss", isDynamic: true, conversationId },
+  });
+
+  if (!underboss) {
+    const underbosses = await prisma.agent.findMany({
+      where: { role: "underboss", isDynamic: false },
+    });
+    if (underbosses.length === 0) {
+      throw new Error("No underboss configured. Set up your mafia hierarchy first.");
+    }
+    underboss = underbosses[0];
+  }
+
+  // Update conversation status to active
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { status: "active" },
+  });
+
+  // Create the user message in DB
+  const userMeta: Record<string, unknown> = {};
+  if (images && images.length > 0) userMeta.images = images;
+  if (conversation.workingDirectory) userMeta.workingDirectory = conversation.workingDirectory;
+
+  await prisma.message.create({
+    data: {
+      conversationId,
+      role: "user",
+      content: task,
+      metadata: Object.keys(userMeta).length > 0 ? JSON.stringify(userMeta) : null,
+    },
+  });
+
+  sseManager.emit(conversationId, "task_start", { task });
+
+  // Run orchestration in background
+  runOrchestration(underboss.id, task, conversationId, images, conversation.workingDirectory || undefined).catch((err) => {
+    console.error("Orchestration failed:", err);
+    sseManager.emit(conversationId, "task_error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    prisma.conversation
+      .update({ where: { id: conversationId }, data: { status: "failed" } })
+      .catch(console.error);
+  });
+
+  return conversationId;
+}
+
+export async function startTask(task: string, images?: ImageInput[], workingDirectory?: string, dynamicMode?: boolean): Promise<string> {
   // Initialize debug log for this run (overwrites previous)
   await debugLogInit();
 
+  if (dynamicMode) {
+    const { conversationId } = await createDynamicOrg(task, workingDirectory);
+    await executeConversation(conversationId, task, images);
+    return conversationId;
+  }
+
+  // Standard mode: use existing static agents
+  const conversation = await prisma.conversation.create({
+    data: { title: task.slice(0, 100), workingDirectory },
+  });
+
   const underbosses = await prisma.agent.findMany({
-    where: { role: "underboss" },
+    where: { role: "underboss", isDynamic: false },
   });
 
   if (underbosses.length === 0) {
     throw new Error("No underboss configured. Set up your mafia hierarchy first.");
   }
-
-  const conversation = await prisma.conversation.create({
-    data: { title: task.slice(0, 100), workingDirectory },
-  });
+  const underbossId = underbosses[0].id;
 
   const userMeta: Record<string, unknown> = {};
   if (images && images.length > 0) userMeta.images = images;
@@ -361,8 +509,7 @@ export async function startTask(task: string, images?: ImageInput[], workingDire
   sseManager.emit(conversation.id, "task_start", { task });
 
   // Run orchestration in background — don't block the HTTP response
-  const underboss = underbosses[0];
-  runOrchestration(underboss.id, task, conversation.id, images, workingDirectory).catch((err) => {
+  runOrchestration(underbossId, task, conversation.id, images, workingDirectory).catch((err) => {
     console.error("Orchestration failed:", err);
     sseManager.emit(conversation.id, "task_error", {
       error: err instanceof Error ? err.message : String(err),
@@ -417,10 +564,21 @@ export async function continueTask(
   });
   if (!conversation) throw new Error("Conversation not found");
 
-  const underbosses = await prisma.agent.findMany({
-    where: { role: "underboss" },
+  // Check if this conversation has dynamic agents
+  const dynamicUnderboss = await prisma.agent.findFirst({
+    where: { role: "underboss", isDynamic: true, conversationId },
   });
-  if (underbosses.length === 0) throw new Error("No underboss configured.");
+
+  let underboss;
+  if (dynamicUnderboss) {
+    underboss = dynamicUnderboss;
+  } else {
+    const underbosses = await prisma.agent.findMany({
+      where: { role: "underboss", isDynamic: false },
+    });
+    if (underbosses.length === 0) throw new Error("No underboss configured.");
+    underboss = underbosses[0];
+  }
 
   const userMeta: Record<string, unknown> = {};
   if (images && images.length > 0) userMeta.images = images;
@@ -464,7 +622,6 @@ export async function continueTask(
 
   sseManager.emit(conversationId, "task_start", { task: followUp });
 
-  const underboss = underbosses[0];
   const workingDirectory = conversation.workingDirectory || undefined;
 
   runOrchestration(underboss.id, taskWithHistory, conversationId, images, workingDirectory).catch((err) => {

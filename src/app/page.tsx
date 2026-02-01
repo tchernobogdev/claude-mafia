@@ -27,6 +27,7 @@ export default function Dashboard() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dynamicMode, setDynamicMode] = useState(false);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -106,30 +107,53 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     try {
-      const payload: Record<string, unknown> = { task };
-      if (workingDir.trim()) payload.workingDirectory = workingDir.trim();
-      if (images.length > 0) {
-        payload.images = images.map(({ type, media_type, data }) => ({ type, media_type, data }));
-      }
-      const res = await fetch("/api/conversations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      const data = await res.json();
-      if (data.conversationId) {
-        // Add to list immediately so it's visible if user navigates back
-        setConversations((prev) => [
-          { id: data.conversationId, title: task.slice(0, 100), status: "active", createdAt: new Date().toISOString(), _count: { messages: 1 } },
-          ...prev.filter((c) => c.id !== data.conversationId),
-        ]);
-        setTask("");
-        setImages([]);
-        toast("Operation started", "success");
-        router.push(`/conversation/${data.conversationId}`);
+      if (dynamicMode) {
+        // Dynamic mode: generate org, then redirect to configure page
+        const payload: Record<string, unknown> = { task };
+        if (workingDir.trim()) payload.workingDirectory = workingDir.trim();
+        const res = await fetch("/api/org/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`Request failed (${res.status})`);
+        const data = await res.json();
+        if (data.conversationId) {
+          const pendingTask = task;
+          setTask("");
+          setImages([]);
+          toast("Organization generated", "success");
+          router.push(`/configure?conversationId=${data.conversationId}&pendingTask=${encodeURIComponent(pendingTask)}`);
+        } else {
+          toast(data.error || "Failed to generate org", "error");
+        }
       } else {
-        toast(data.error || "Failed to start task", "error");
+        // Standard mode: existing behavior
+        const payload: Record<string, unknown> = { task };
+        if (workingDir.trim()) payload.workingDirectory = workingDir.trim();
+        if (images.length > 0) {
+          payload.images = images.map(({ type, media_type, data }) => ({ type, media_type, data }));
+        }
+        const res = await fetch("/api/conversations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`Request failed (${res.status})`);
+        const data = await res.json();
+        if (data.conversationId) {
+          // Add to list immediately so it's visible if user navigates back
+          setConversations((prev) => [
+            { id: data.conversationId, title: task.slice(0, 100), status: "active", createdAt: new Date().toISOString(), _count: { messages: 1 } },
+            ...prev.filter((c) => c.id !== data.conversationId),
+          ]);
+          setTask("");
+          setImages([]);
+          toast("Operation started", "success");
+          router.push(`/conversation/${data.conversationId}`);
+        } else {
+          toast(data.error || "Failed to start task", "error");
+        }
       }
     } catch (err) {
       console.error("StartTask:", err);
@@ -216,6 +240,28 @@ export default function Dashboard() {
             Browse...
           </button>
         </div>
+        {/* Dynamic Organization Toggle */}
+        <div className="flex items-center justify-between bg-bg border border-border rounded-lg px-4 py-3">
+          <div className="flex-1 mr-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text">Dynamic Organization</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium">AI</span>
+            </div>
+            {dynamicMode && (
+              <p className="text-xs text-text-muted mt-1">AI will design a custom organization tailored to your task instead of using the pre-configured team.</p>
+            )}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={dynamicMode}
+            onClick={() => setDynamicMode(!dynamicMode)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${dynamicMode ? "bg-accent" : "bg-border"}`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${dynamicMode ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {images.map((img, i) => (

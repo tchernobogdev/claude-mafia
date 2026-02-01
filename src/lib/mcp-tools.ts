@@ -269,6 +269,136 @@ export async function buildAgentMcpServer(
     },
   });
 
+  // Tester-specific tools for code execution and testing
+  if (agent.role === "tester") {
+    const { executeCode } = await import("./sandbox");
+    const { runTests } = await import("./test-runner");
+    const { parseErrors } = await import("./error-parser");
+
+    tools.push({
+      name: "execute_code",
+      description: "Execute code in a sandboxed environment. Supports Python, TypeScript, and JavaScript. Returns stdout, stderr, exit code, and structured compilation errors if any.",
+      inputSchema: {
+        code: z.string().describe("The code to execute"),
+        language: z.enum(["python", "typescript", "javascript"]).describe("The programming language"),
+        timeout: z.number().optional().describe("Optional timeout in milliseconds (default: 30000)"),
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const code = args.code as string;
+        const language = args.language as "python" | "typescript" | "javascript";
+        const timeout = (args.timeout as number | undefined) || 30000;
+
+        const result = await executeCode({ code, language, timeout });
+
+        // Parse errors from stderr if execution failed
+        const errors = result.exitCode !== 0 && result.stderr
+          ? parseErrors(result.stderr)
+          : [];
+
+        const output = {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          errors: errors.length > 0 ? errors : undefined,
+        };
+
+        await context.emitActivity(context.conversationId, "tool_result", {
+          agentId: agent.id,
+          agentName: agent.name,
+          tool: "execute_code",
+          result: `Exit code: ${result.exitCode}, Errors: ${errors.length}`,
+        });
+
+        return { content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }] };
+      },
+    });
+
+    tools.push({
+      name: "run_build",
+      description: "Run a build command (e.g., 'npm run build', 'tsc --noEmit', 'npx eslint .') in the working directory. Returns structured compilation errors with file, line, column, and message.",
+      inputSchema: {
+        command: z.string().describe("The build command to execute (e.g., 'npm run build', 'tsc --noEmit')"),
+        timeout: z.number().optional().describe("Optional timeout in milliseconds (default: 60000)"),
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const command = args.command as string;
+        const timeout = (args.timeout as number | undefined) || 60000;
+
+        const result = await executeCode({
+          code: "",
+          language: "build",
+          buildCommand: command,
+          timeout,
+        });
+
+        // Parse compilation errors from output
+        const errors = parseErrors(result.stderr || result.stdout);
+
+        const output = {
+          command,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          compilationErrors: errors.length > 0 ? errors : undefined,
+          errorCount: errors.length,
+        };
+
+        await context.emitActivity(context.conversationId, "tool_result", {
+          agentId: agent.id,
+          agentName: agent.name,
+          tool: "run_build",
+          result: `Exit code: ${result.exitCode}, Errors: ${errors.length}`,
+        });
+
+        return { content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }] };
+      },
+    });
+
+    tools.push({
+      name: "run_tests",
+      description: "Execute tests using a test framework (jest, vitest, pytest, mocha). Returns structured test results including passed/failed counts and individual test case details.",
+      inputSchema: {
+        framework: z.enum(["jest", "vitest", "pytest", "mocha"]).describe("The test framework to use"),
+        testPath: z.string().optional().describe("Optional specific test file or pattern to run"),
+        timeout: z.number().optional().describe("Optional timeout in milliseconds (default: 60000)"),
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const framework = args.framework as "jest" | "vitest" | "pytest" | "mocha";
+        const testPath = args.testPath as string | undefined;
+        const timeout = (args.timeout as number | undefined) || 60000;
+        const workingDirectory = context.workingDirectory || process.cwd();
+
+        const result = await runTests({
+          framework,
+          workingDirectory,
+          testPath,
+          timeout,
+        });
+
+        const output = {
+          framework,
+          testPath,
+          passed: result.passed,
+          failed: result.failed,
+          skipped: result.skipped,
+          total: result.total,
+          exitCode: result.exitCode,
+          errors: result.errors,
+          testCases: result.testCases.slice(0, 50), // Limit to first 50 test cases
+        };
+
+        await context.emitActivity(context.conversationId, "tool_result", {
+          agentId: agent.id,
+          agentName: agent.name,
+          tool: "run_tests",
+          result: `${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`,
+        });
+
+        return { content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }] };
+      },
+    });
+  }
+
   // Escalation is available to underbosses
   if (agent.role === "underboss" || agent.role === "tester") {
     tools.push({

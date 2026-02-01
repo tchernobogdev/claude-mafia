@@ -22,6 +22,8 @@ model Agent {
   orderIndex   Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  isDynamic    Boolean  @default(false)
+  conversationId String?
 
   outgoingRels   Relationship[]  @relation("FromAgent")
   incomingRels   Relationship[]  @relation("ToAgent")
@@ -51,6 +53,7 @@ model Conversation {
   messages         Message[]
   escalations      Escalation[]
   agentContexts    AgentContext[]
+  testRuns         TestRun[]
 }
 
 model Message {
@@ -94,4 +97,35 @@ model Setting {
   key       String   @unique
   value     String
   updatedAt DateTime @updatedAt
+}
+
+model OrgTemplate {
+  id            String   @id @default(cuid())
+  name          String
+  agents        String
+  relationships String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model TestRun {
+  id             String    @id @default(cuid())
+  conversationId String
+  agentId        String
+  status         String    // "running", "passed", "failed"
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+  summary        String?
+  testCases      TestCase[]
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model TestCase {
+  id        String  @id @default(cuid())
+  testRunId String
+  name      String
+  status    String  // "passed", "failed", "skipped"
+  error     String?
+  duration  Int?    // milliseconds
+  testRun   TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
 }
