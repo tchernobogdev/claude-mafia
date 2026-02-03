@@ -252,6 +252,7 @@ export default function AgentConfigPage() {
               <option value="capo">Capo</option>
               <option value="soldier">Soldier</option>
               <option value="tester">Tester</option>
+              <option value="analyst">Analyst (Visual/Kimi)</option>
             </select>
           </div>
           <div>

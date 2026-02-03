@@ -9,6 +9,9 @@ export async function POST(req: NextRequest) {
     const result = await createDynamicOrg(task, workingDirectory);
     return NextResponse.json(result);
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Failed" }, { status: 500 });
+    console.error("[org/generate] Error:", err);
+    const errorMessage = err instanceof Error ? err.message : "Failed";
+    const errorStack = err instanceof Error ? err.stack : undefined;
+    return NextResponse.json({ error: errorMessage, stack: errorStack }, { status: 500 });
   }
 }

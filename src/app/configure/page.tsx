@@ -716,6 +716,7 @@ function ConfigurePageInner() {
                 <option value="capo">Capo</option>
                 <option value="soldier">Soldier</option>
                 <option value="tester">Tester</option>
+                <option value="analyst">Analyst (Visual/Kimi)</option>
               </select>
             </div>
             <div>
@@ -725,9 +726,16 @@ function ConfigurePageInner() {
                 onChange={(e) => setForm({ ...form, model: e.target.value })}
                 className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-accent"
               >
-                <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
-                <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
-                <option value="claude-opus-4-5-20251101">Opus 4.5</option>
+                <optgroup label="Anthropic (Claude)">
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                  <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+                </optgroup>
+                <optgroup label="Kimi 2.5 (Moonshot)">
+                  <option value="kimi-2.5-latest">Kimi 2.5 Latest</option>
+                </optgroup>
+                <optgroup label="Anthropic (Other)">
+                  <option value="claude-opus-4-5-20251101">Opus 4.5</option>
+                </optgroup>
               </select>
             </div>
             <div>
@@ -1069,6 +1077,7 @@ function ConfigurePageInner() {
                   <option value="capo">Capo</option>
                   <option value="soldier">Soldier</option>
                   <option value="tester">Tester</option>
+                  <option value="analyst">Analyst (Visual/Kimi)</option>
                 </select>
               </div>
               <div>
@@ -1078,9 +1087,14 @@ function ConfigurePageInner() {
                   onChange={(e) => setEditForm({ ...editForm, model: e.target.value })}
                   className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-accent"
                 >
-                  <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
-                  <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
-                  <option value="claude-opus-4-5-20251101">Opus 4.5</option>
+                  <optgroup label="Anthropic (Claude)">
+                    <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                    <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+                    <option value="claude-opus-4-5-20251101">Opus 4.5</option>
+                  </optgroup>
+                  <optgroup label="Kimi 2.5 (Moonshot)">
+                    <option value="kimi-2.5-latest">Kimi 2.5 Latest</option>
+                  </optgroup>
                 </select>
               </div>
               <div>

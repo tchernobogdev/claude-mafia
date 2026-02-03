@@ -1,36 +1,34 @@
-datasource db {
-  provider = "sqlite"
-  // WAL mode enabled for better concurrent write performance
-  url      = "file:./dev.db?mode=wal&_journal_mode=WAL&_busy_timeout=5000"
-}
-
 generator client {
   provider = "prisma-client-js"
 }
 
-model Agent {
-  id           String   @id @default(cuid())
-  name         String
-  role         String   // "underboss" | "capo" | "soldier" | "tester"
-  specialty    String?
-  systemPrompt String   @default("")
-  model        String   @default("claude-sonnet-4-5-20250929")
-  providerId   String   @default("anthropic") // "anthropic" | "kimi" | "openai"
-  parentId     String?
-  parent       Agent?   @relation("Hierarchy", fields: [parentId], references: [id])
-  children     Agent[]  @relation("Hierarchy")
-  posX         Float    @default(100)
-  posY         Float    @default(100)
-  orderIndex   Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  isDynamic    Boolean  @default(false)
-  conversationId String?
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db?mode=wal&_journal_mode=WAL&_busy_timeout=5000"
+}
 
-  outgoingRels   Relationship[]  @relation("FromAgent")
-  incomingRels   Relationship[]  @relation("ToAgent")
-  messages       Message[]
+model Agent {
+  id             String         @id @default(cuid())
+  name           String
+  role           String
+  specialty      String?
+  systemPrompt   String         @default("")
+  model          String         @default("claude-sonnet-4-5-20250929")
+  providerId     String         @default("anthropic")
+  parentId       String?
+  posX           Float          @default(100)
+  posY           Float          @default(100)
+  orderIndex     Int            @default(0)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  isDynamic      Boolean        @default(false)
+  conversationId String?
+  parent         Agent?         @relation("Hierarchy", fields: [parentId], references: [id])
+  children       Agent[]        @relation("Hierarchy")
   agentContexts  AgentContext[]
+  messages       Message[]
+  incomingRels   Relationship[] @relation("ToAgent")
+  outgoingRels   Relationship[] @relation("FromAgent")
 
   @@index([role, isDynamic])
   @@index([conversationId])
@@ -40,26 +38,26 @@ model Relationship {
   id          String @id @default(cuid())
   fromAgentId String
   toAgentId   String
-  action      String // "delegate" | "collaborate" | "test"
-  cardinality String @default("1:1") // "1:1" | "1:many" | "many:1"
-  fromAgent   Agent  @relation("FromAgent", fields: [fromAgentId], references: [id], onDelete: Cascade)
+  action      String
+  cardinality String @default("1:1")
   toAgent     Agent  @relation("ToAgent", fields: [toAgentId], references: [id], onDelete: Cascade)
+  fromAgent   Agent  @relation("FromAgent", fields: [fromAgentId], references: [id], onDelete: Cascade)
 
   @@unique([fromAgentId, toAgentId, action])
 }
 
 model Conversation {
-  id               String    @id @default(cuid())
-  title            String    @default("New Task")
-  status           String    @default("active") // "active" | "completed" | "paused"
+  id               String           @id @default(cuid())
+  title            String           @default("New Task")
+  status           String           @default("active")
   workingDirectory String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  messages         Message[]
-  escalations      Escalation[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
   agentContexts    AgentContext[]
-  testRuns         TestRun[]
+  escalations      Escalation[]
+  messages         Message[]
   progress         ProjectProgress?
+  testRuns         TestRun[]
 
   @@index([status])
   @@index([createdAt])
@@ -68,15 +66,14 @@ model Conversation {
 model Message {
   id             String       @id @default(cuid())
   conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   agentId        String?
-  agent          Agent?       @relation(fields: [agentId], references: [id])
-  role           String       // "user" | "assistant" | "system" | "escalation"
+  role           String
   content        String
-  metadata       String?      // JSON
+  metadata       String?
   createdAt      DateTime     @default(now())
+  agent          Agent?       @relation(fields: [agentId], references: [id])
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
-  // Indexes for query performance on large conversations
   @@index([conversationId, role])
   @@index([conversationId, agentId])
   @@index([conversationId, createdAt])
@@ -85,12 +82,12 @@ model Message {
 model Escalation {
   id             String       @id @default(cuid())
   conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   fromAgentId    String
   question       String
   answer         String?
-  status         String       @default("pending") // "pending" | "answered"
+  status         String       @default("pending")
   createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@index([conversationId, status])
 }
@@ -98,12 +95,12 @@ model Escalation {
 model AgentContext {
   id             String       @id @default(cuid())
   conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   agentId        String
-  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
   summary        String
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
+  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@unique([conversationId, agentId])
 }
@@ -125,11 +122,11 @@ model OrgTemplate {
 }
 
 model TestRun {
-  id             String    @id @default(cuid())
+  id             String       @id @default(cuid())
   conversationId String
   agentId        String
-  status         String    // "running", "passed", "failed"
-  startedAt      DateTime  @default(now())
+  status         String
+  startedAt      DateTime     @default(now())
   completedAt    DateTime?
   summary        String?
   testCases      TestCase[]
@@ -142,65 +139,48 @@ model TestCase {
   id        String  @id @default(cuid())
   testRunId String
   name      String
-  status    String  // "passed", "failed", "skipped"
+  status    String
   error     String?
-  duration  Int?    // milliseconds
+  duration  Int?
   testRun   TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
 }
 
-// ==================== PROGRESS TRACKING FOR MULTI-DAY PROJECTS ====================
-
 model ProjectProgress {
-  id             String       @id @default(cuid())
-  conversationId String       @unique
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  // High-level tracking
-  projectName    String       // e.g., "Medusa Ecommerce Implementation"
-  objective      String       // The main goal
-  currentPhase   String       @default("planning") // planning, implementation, testing, review, complete
-  overallStatus  String       @default("in_progress") // in_progress, blocked, paused, complete
-
-  // Progress metrics
-  totalPhases    Int          @default(0)
-  completedPhases Int         @default(0)
-
-  // Timestamps
-  startedAt      DateTime     @default(now())
-  lastActiveAt   DateTime     @default(now())
-  completedAt    DateTime?
-
-  // Relations
-  phases         ProgressPhase[]
-  fileChanges    FileChange[]
-  decisions      Decision[]
-  checkpoints    Checkpoint[]
-
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id              String          @id @default(cuid())
+  conversationId  String          @unique
+  projectName     String
+  objective       String
+  currentPhase    String          @default("planning")
+  overallStatus   String          @default("in_progress")
+  totalPhases     Int             @default(0)
+  completedPhases Int             @default(0)
+  startedAt       DateTime        @default(now())
+  lastActiveAt    DateTime        @default(now())
+  completedAt     DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  checkpoints     Checkpoint[]
+  decisions       Decision[]
+  fileChanges     FileChange[]
+  phases          ProgressPhase[]
+  conversation    Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 }
 
 model ProgressPhase {
   id          String          @id @default(cuid())
   progressId  String
-  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
-
-  name        String          // e.g., "Database Schema Design"
-  description String          // What this phase involves
-  status      String          @default("pending") // pending, in_progress, completed, blocked, skipped
+  name        String
+  description String
+  status      String          @default("pending")
   orderIndex  Int             @default(0)
-
-  // Tracking
-  assignedTo  String?         // Agent name that worked on this
-  result      String?         // Summary of what was done
-  blockedBy   String?         // What's blocking this phase
-
-  // Timestamps
+  assignedTo  String?
+  result      String?
+  blockedBy   String?
   startedAt   DateTime?
   completedAt DateTime?
-
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
 
   @@index([progressId, status])
   @@index([progressId, orderIndex])
@@ -209,15 +189,13 @@ model ProgressPhase {
 model FileChange {
   id          String          @id @default(cuid())
   progressId  String
-  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
-
-  filePath    String          // Path to the file
-  changeType  String          // created, modified, deleted
-  description String          // What was changed and why
-  agentName   String?         // Which agent made the change
-  phaseId     String?         // Which phase this belongs to
-
+  filePath    String
+  changeType  String
+  description String
+  agentName   String?
+  phaseId     String?
   createdAt   DateTime        @default(now())
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
 
   @@index([progressId, createdAt])
 }
@@ -225,39 +203,31 @@ model FileChange {
 model Decision {
   id          String          @id @default(cuid())
   progressId  String
-  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
-
-  topic       String          // e.g., "Authentication Method"
-  question    String          // The question that was decided
-  decision    String          // What was decided
-  rationale   String?         // Why this decision was made
-  madeBy      String          // "user" or agent name
-  phaseId     String?         // Which phase this relates to
-
-  // Tracking if decision needs revisiting
+  topic       String
+  question    String
+  decision    String
+  rationale   String?
+  madeBy      String
+  phaseId     String?
   revisitFlag Boolean         @default(false)
   revisitNote String?
-
   createdAt   DateTime        @default(now())
+  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
 
   @@index([progressId, createdAt])
   @@index([progressId, revisitFlag])
 }
 
 model Checkpoint {
-  id          String          @id @default(cuid())
-  progressId  String
-  progress    ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
-
-  name        String          // e.g., "End of Day 1", "Before Major Refactor"
-  description String          // What state the project is in
-
-  // Snapshot of state
-  phaseSnapshot    String     // JSON: which phases were complete
-  pendingTasks     String     // JSON: what still needs to be done
-  contextSummary   String     // Comprehensive summary for resuming
-
-  createdAt   DateTime        @default(now())
+  id             String          @id @default(cuid())
+  progressId     String
+  name           String
+  description    String
+  phaseSnapshot  String
+  pendingTasks   String
+  contextSummary String
+  createdAt      DateTime        @default(now())
+  progress       ProjectProgress @relation(fields: [progressId], references: [id], onDelete: Cascade)
 
   @@index([progressId, createdAt])
 }
