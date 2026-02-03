@@ -118,7 +118,7 @@ export default function AgentConfigPage() {
         // Non-critical - use default providers
         setProviders([
           { id: "anthropic", name: "Anthropic (Claude)", isConfigured: true, models: ["claude-sonnet-4-5-20250929", "claude-opus-4-5-20251101", "claude-haiku-4-5-20251001"] },
-          { id: "kimi", name: "Kimi 2.5 (Moonshot)", isConfigured: false, models: ["kimi-2.5-latest"], configHint: "Set KIMI_API_KEY in .env" },
+          { id: "kimi", name: "Kimi (Moonshot)", isConfigured: false, models: ["kimi-k2.5", "kimi-latest"], configHint: "Set KIMI_API_KEY in .env" },
         ]);
       }
     };

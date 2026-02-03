@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { detectProviderFromModel } from "@/lib/providers";
 
 export async function GET(
   _req: NextRequest,
@@ -35,8 +36,16 @@ export async function PATCH(
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
-  // Determine final providerId and role after update
-  const finalProviderId = body.providerId ?? currentAgent.providerId ?? "anthropic";
+  // Auto-detect provider from model if model is being updated but providerId isn't
+  const finalModel = body.model ?? currentAgent.model;
+  let finalProviderId = body.providerId ?? currentAgent.providerId ?? "anthropic";
+
+  // If model changed but providerId wasn't explicitly set, auto-detect
+  if (body.model && !body.providerId) {
+    finalProviderId = detectProviderFromModel(body.model);
+    body.providerId = finalProviderId; // Include in update
+  }
+
   const finalRole = body.role ?? currentAgent.role ?? "soldier";
 
   // Validate: non-Anthropic providers can only be used for analysis roles

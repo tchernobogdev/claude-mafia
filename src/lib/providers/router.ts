@@ -58,7 +58,7 @@ export function detectProviderFromModel(model: string): ProviderId {
     return "anthropic";
   }
   // Kimi models
-  if (model.startsWith("kimi-") || model.startsWith("moonshot-")) {
+  if (model.startsWith("kimi-") || model.startsWith("kimi-k") || model.startsWith("moonshot-")) {
     return "kimi";
   }
   // OpenAI models

@@ -730,8 +730,9 @@ function ConfigurePageInner() {
                   <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
                   <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
                 </optgroup>
-                <optgroup label="Kimi 2.5 (Moonshot)">
-                  <option value="kimi-2.5-latest">Kimi 2.5 Latest</option>
+                <optgroup label="Kimi (Moonshot)">
+                  <option value="kimi-k2.5">Kimi K2.5 (Vision/Reasoning)</option>
+                  <option value="kimi-latest">Kimi Latest (Vision)</option>
                 </optgroup>
                 <optgroup label="Anthropic (Other)">
                   <option value="claude-opus-4-5-20251101">Opus 4.5</option>
@@ -1092,8 +1093,9 @@ function ConfigurePageInner() {
                     <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
                     <option value="claude-opus-4-5-20251101">Opus 4.5</option>
                   </optgroup>
-                  <optgroup label="Kimi 2.5 (Moonshot)">
-                    <option value="kimi-2.5-latest">Kimi 2.5 Latest</option>
+                  <optgroup label="Kimi (Moonshot)">
+                    <option value="kimi-k2.5">Kimi K2.5 (Vision/Reasoning)</option>
+                    <option value="kimi-latest">Kimi Latest (Vision)</option>
                   </optgroup>
                 </select>
               </div>

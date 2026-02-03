@@ -255,7 +255,7 @@ DO NOT attempt to write code or make changes yourself - just analyze and report 
     console.log(`[VisualRouter] Sending ${images.length} image(s) to Kimi for analysis...`);
 
     const response = await provider.chat({
-      model: kimiAgent.model || "kimi-2.5-latest",
+      model: kimiAgent.model || "kimi-k2.5",
       messages,
       system: systemPrompt,
       max_tokens: 4096,

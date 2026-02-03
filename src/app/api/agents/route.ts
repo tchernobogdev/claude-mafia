@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { detectProviderFromModel } from "@/lib/providers";
 
 export async function GET(req: NextRequest) {
   try {
@@ -25,8 +26,9 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // Validate: non-Anthropic providers can only be used for analysis roles
-    const providerId = body.providerId || "anthropic";
+    // Auto-detect provider from model name if not explicitly provided
+    const model = body.model || "claude-sonnet-4-5-20250929";
+    const providerId = body.providerId || detectProviderFromModel(model);
     const role = body.role || "soldier";
 
     if (providerId !== "anthropic" && TOOL_REQUIRED_ROLES.includes(role)) {
@@ -45,8 +47,8 @@ export async function POST(req: NextRequest) {
         role: body.role,
         specialty: body.specialty || null,
         systemPrompt: body.systemPrompt || "",
-        model: body.model || "claude-sonnet-4-5-20250929",
-        providerId: body.providerId || "anthropic",
+        model: model,
+        providerId: providerId,
         parentId: body.parentId || null,
         posX: body.posX ?? 100,
         posY: body.posY ?? 100,

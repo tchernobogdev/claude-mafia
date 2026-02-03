@@ -15,7 +15,10 @@ import {
 const KIMI_API_BASE = "https://api.moonshot.ai/v1";
 
 const KIMI_MODELS = [
-  "kimi-2.5-latest",          // Latest Kimi 2.5
+  "kimi-k2.5",                // Kimi 2.5 - images, video, reasoning, 262k context
+  "kimi-latest",              // Latest Kimi - images, 131k context
+  "moonshot-v1-128k-vision-preview",  // 128k vision
+  "moonshot-v1-32k-vision-preview",   // 32k vision
   "moonshot-v1-128k",         // 128k context
   "moonshot-v1-32k",          // 32k context
   "moonshot-v1-8k",           // 8k context
@@ -112,7 +115,7 @@ export class KimiProvider implements LLMProvider {
     const messages = this.convertMessages(request.messages, request.system);
 
     const body: Record<string, unknown> = {
-      model: request.model || "kimi-2.5-latest",
+      model: request.model || "kimi-k2.5",
       messages,
       max_tokens: request.max_tokens || 8192,
     };
